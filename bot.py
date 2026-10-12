@@ -1,21 +1,25 @@
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from html import escape
 from secrets import token_hex
 
 from aiogram import BaseMiddleware, Dispatcher, Router
 from aiogram.fsm.storage.memory import SimpleEventIsolation
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 from reminders import display_date, server_text
-from storage import FIELDS, validate_field, validate_server
+from reports import build_report
+from storage import FIELDS, validate_amount, validate_field, validate_payment_dates, validate_server
 
 
 LABELS = {"name": "Название сервера", "hoster": "Название хостера", "website": "Сайт хостера",
           "ip_address": "IP-адрес", "domain": "Доменное имя",
-          "starts_on": "Дата начала аренды", "ends_on": "Дата окончания оплаты"}
+          "starts_on": "Дата начала аренды", "ends_on": "Дата окончания оплаты",
+          "amount_kopeks": "Стоимость последнего периода"}
+FORM_FIELDS = (*FIELDS, "amount_kopeks")
 logger = logging.getLogger(__name__)
 
 
@@ -25,7 +29,7 @@ def keyboard(rows):
 
 
 MENU = keyboard([[('➕ Добавить сервер', 'add')], [('✏️ Изменить сервер', 'list:0')],
-                 [('🖥 Мои сервера', 'servers:0')]])
+                 [('🖥 Мои сервера', 'servers:0')], [('📊 Статистика', 'stats:0')]])
 
 
 class AdminOnly(BaseMiddleware):
@@ -105,10 +109,37 @@ class BotUI:
             await self.say(message, "Сервер уже удалён.", MENU)
             return
         identity = f"{server['id']}:{server['version']}"
-        rows = [[(label, f"edit:{identity}:{key}")] for key, label in LABELS.items()]
-        rows.extend([[("Продлил", f"renew:{identity}"), ("Удалить", f"delete:{identity}")],
-                     [("🖥 Мои сервера", "servers:0"), ("🏠 Главное меню", "menu")]])
-        await self.say(message, server_text(server), keyboard(rows))
+        rows = [[("Продлить", f"renew:{identity}"), ("Редактировать", f"fields:{identity}")],
+                [("Скачать статистику", f"report:{server_id}"), ("Удалить", f"delete:{identity}")],
+                [("🖥 Мои сервера", "servers:0"), ("🏠 Главное меню", "menu")]]
+        await self.say(message, server_text(server, today=self.today()), keyboard(rows))
+
+    async def list_statistics(self, message, page):
+        servers = self.storage.statistics()
+        page = min(max(page, 0), max(0, (len(servers) - 1) // 10))
+        rows = [[("Скачать по всем серверам", "report:all")]]
+        for server in servers[page * 10:(page + 1) * 10]:
+            label = ("🗃 Удалён · " if server["deleted_at"] else "") + server["name"][:50]
+            rows.append([(label, f"report:{server['id']}")])
+        navigation = []
+        if page:
+            navigation.append(("← Назад", f"stats:{page - 1}"))
+        if (page + 1) * 10 < len(servers):
+            navigation.append(("Далее →", f"stats:{page + 1}"))
+        if navigation:
+            rows.append(navigation)
+        rows.append([("🏠 Главное меню", "menu")])
+        await self.say(message, f"📊 Статистика (страница {page + 1})\n"
+                       "Выберите сервер или скачайте общую историю оплат. Удалённые серверы сохранены в архиве.", keyboard(rows))
+
+    async def send_statistics(self, message, server_id=None):
+        servers = self.storage.statistics(server_id)
+        if server_id is not None and not servers:
+            await self.say(message, "Сервер не найден в статистике.", MENU)
+            return
+        data = await asyncio.to_thread(build_report, servers, single=server_id is not None)
+        name = f"server-{server_id}-statistics.xlsx" if server_id is not None else "servers-statistics.xlsx"
+        await message.answer_document(BufferedInputFile(data, filename=name), caption="История оплаченных периодов и сумм в рублях.")
 
     def form_keyboard(self, draft, confirm=False):
         rows = []
@@ -121,7 +152,9 @@ class BotUI:
     async def prompt(self, message, draft):
         selected = draft.selected_field
         hint = " (ДД.ММ.ГГГГ)" if selected in ("starts_on", "ends_on") else ""
-        if draft.kind == "renew":
+        if selected == "amount_kopeks":
+            text = "Введите сумму оплаты в рублях, например 1500 или 1500,50."
+        elif draft.kind == "renew":
             text = "Введите новую дату окончания оплаты (ДД.ММ.ГГГГ)."
         else:
             text = f"Введите: {LABELS[selected]}{hint}."
@@ -129,7 +162,7 @@ class BotUI:
 
     async def preview(self, message, draft):
         prefix = "Удалить этот сервер?" if draft.kind == "delete" else "Проверьте данные и нажмите «Сохранить»:"
-        await self.say(message, f"{prefix}\n\n{server_text(draft.values)}",
+        await self.say(message, f"{prefix}\n\n{server_text(draft.values, today=self.today())}",
                        self.form_keyboard(draft, confirm=True))
 
     async def stale(self, message, admin_id, server_id):
@@ -154,20 +187,38 @@ class BotUI:
         try:
             value = validate_field(selected, text)
             updated = {**draft.values, selected: value}
-            if draft.kind == "renew":
+            if draft.kind == "renew" and selected == "ends_on":
                 if value <= draft.values["ends_on"]:
                     raise ValueError("Новая дата должна быть позже текущей даты окончания.")
                 if value < self.today().isoformat():
                     raise ValueError("Новая дата не может быть раньше сегодняшней.")
+                updated["payment_starts_on"] = (date.fromisoformat(draft.values["ends_on"]) + timedelta(days=1)).isoformat()
             if all(key in updated for key in FIELDS):
-                updated = validate_server(updated, allow_empty_addresses=draft.kind != "add")
+                updated.update(validate_server(updated, allow_empty_addresses=draft.kind != "add"))
+                if draft.kind == "edit":
+                    validate_payment_dates(updated, self.storage.payment_history(draft.server_id))
+            if selected == "amount_kopeks":
+                if draft.kind == "add":
+                    updated.update(total_paid_kopeks=value, known_payments=1, unknown_payments=0)
+                elif draft.kind == "renew":
+                    updated["total_paid_kopeks"] += value
+                    updated["known_payments"] += 1
+                else:
+                    old_amount = draft.values["amount_kopeks"]
+                    updated["total_paid_kopeks"] += value - (old_amount or 0)
+                    updated["known_payments"] += int(old_amount is None)
+                    updated["unknown_payments"] -= int(old_amount is None)
+                validate_amount(updated["total_paid_kopeks"])
         except ValueError as error:
             await self.say(message, f"{error}\n\nПродолжим с текущего поля: {LABELS[selected]}.",
                            self.form_keyboard(draft))
             return
         draft.values = updated
-        if draft.kind == "add" and selected != FIELDS[-1]:
-            draft.selected_field = FIELDS[FIELDS.index(selected) + 1]
+        if draft.kind == "add" and selected != FORM_FIELDS[-1]:
+            draft.selected_field = FORM_FIELDS[FORM_FIELDS.index(selected) + 1]
+            await self.prompt(message, draft)
+        elif draft.kind == "renew" and selected == "ends_on":
+            draft.selected_field = "amount_kopeks"
             await self.prompt(message, draft)
         else:
             draft.ready = True
@@ -188,9 +239,14 @@ class BotUI:
             else:
                 if draft.kind == "renew" and draft.values["ends_on"] < self.today().isoformat():
                     draft.ready = False
+                    draft.values = dict(saved)
+                    draft.selected_field = "ends_on"
                     await self.say(message, "Дата уже в прошлом. Введите актуальную дату.", self.form_keyboard(draft))
                     return
-                success = self.storage.update(server_id, draft.version, draft.values)
+                if draft.kind == "renew":
+                    success = self.storage.renew(server_id, draft.version, draft.values["ends_on"], draft.values["amount_kopeks"])
+                else:
+                    success = self.storage.update(server_id, draft.version, draft.values)
             if not success:
                 await self.stale(message, admin_id, server_id)
                 return
@@ -220,23 +276,34 @@ class BotUI:
                 await self.menu(message, admin_id)
             elif draft.ready:
                 await self.save(message, admin_id, draft)
-        elif action in ("list", "servers", "view") and len(parts) == 2 and parts[1].isdigit():
+        elif action == "report" and len(parts) == 2 and (parts[1] == "all" or parts[1].isdigit()):
+            self.drafts.pop(admin_id, None)
+            await self.send_statistics(message, None if parts[1] == "all" else int(parts[1]))
+        elif action in ("list", "servers", "view", "stats") and len(parts) == 2 and parts[1].isdigit():
             self.drafts.pop(admin_id, None)
             if action in ("list", "servers"):
                 await self.list_servers(message, int(parts[1]), overview=action == "servers")
+            elif action == "stats":
+                await self.list_statistics(message, int(parts[1]))
             else:
                 await self.card(message, int(parts[1]))
-        elif (action in ("edit", "renew", "delete") and len(parts) == (4 if action == "edit" else 3)
+        elif (action in ("edit", "renew", "delete", "fields") and len(parts) == (4 if action == "edit" else 3)
               and parts[1].isdigit() and parts[2].isdigit()):
             server_id, version = int(parts[1]), int(parts[2])
             selected = parts[3] if action == "edit" else "ends_on"
-            if selected not in FIELDS:
+            if selected not in FORM_FIELDS:
                 return
             server = self.storage.get(server_id)
             if server is None or server["version"] != version:
                 await self.stale(message, admin_id, server_id)
                 return
-            draft = Draft(action, values={key: server[key] for key in FIELDS},
+            if action == "fields":
+                self.drafts.pop(admin_id, None)
+                rows = [[(label, f"edit:{server_id}:{version}:{key}")] for key, label in LABELS.items()]
+                rows.append([("← К серверу", f"view:{server_id}")])
+                await self.say(message, "✏️ Выберите данные для изменения:", keyboard(rows))
+                return
+            draft = Draft(action, values=dict(server),
                           server_id=server_id, version=version, selected_field=selected,
                           ready=action == "delete")
             self.drafts[admin_id] = draft

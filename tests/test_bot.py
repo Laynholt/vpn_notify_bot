@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.exceptions import TelegramNetworkError
 
 from bot import create_dispatcher
 from config import Settings
@@ -66,7 +67,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_add_saves_only_after_confirmation(self):
         await self.click("add")
-        for text in ("VPN", "Host", "https://example.com", "192.0.2.10", "vpn.example.com", "01.10.2026", "19.10.2026"):
+        for text in ("VPN", "Host", "https://example.com", "192.0.2.10", "vpn.example.com", "01.10.2026", "19.10.2026", "1500,50"):
             await self.send(text)
         self.assertEqual(self.store.list(), [])
         await self.click(self.button("Сохранить"))
@@ -84,6 +85,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send("18.10.2026")
         self.assertIn("раньше", self.session.messages[-1].text)
         await self.send("20.10.2026")
+        await self.send("100")
         await self.click(self.button("Сохранить"))
         self.assertEqual(self.store.list()[0]["ends_on"], "2026-10-20")
 
@@ -98,6 +100,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send("vpn.example.com")
         await self.send("01.10.2026")
         await self.send("19.10.2026")
+        await self.send("100")
         await self.click(self.button("Сохранить"))
         server = self.store.list()[0]
         self.assertEqual(server["name"], "First server")
@@ -116,6 +119,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Домен: не указан", self.session.messages[-1].text)
         await self.click("renew:7:4")
         await self.send("19.11.2026")
+        await self.send("100")
         await self.click(self.button("Сохранить"))
         self.assertEqual(self.store.get(7)["ends_on"], "2026-11-19")
         await self.click("edit:7:5:ip_address")
@@ -202,11 +206,13 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         server = self.store.add(FIELDS)
         await self.click(f"renew:{server['id']}:1", admin=456)
         await self.send("19.12.2026", admin=456)
+        await self.send("200", admin=456)
         second_save = self.button("Сохранить")
         await self.click(f"renew:{server['id']}:1")
         await self.send("19.10.2026")
         self.assertIn("позже", self.session.messages[-1].text)
         await self.send("19.11.2026")
+        await self.send("100")
         await self.click(self.button("Сохранить"))
         await self.click(second_save, admin=456)
         self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-11-19")
@@ -229,9 +235,11 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click(f"renew:{server['id']}:1")
         old_cancel = self.button("Отмена")
         await self.send("19.11.2026")
+        await self.send("100")
         old_save = self.button("Сохранить")
         await self.click(f"renew:{server['id']}:1")
         await self.send("19.12.2026")
+        await self.send("200")
         new_save = self.button("Сохранить")
         await self.click(old_cancel)
         await self.click(old_save)
@@ -248,6 +256,98 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click(self.button("Сохранить"))
         self.assertEqual(self.store.get(server["id"])["name"], "<VPN>")
         self.assertIn("&lt;VPN&gt;", self.session.messages[-1].text)
+
+    async def test_renew_asks_amount_before_confirmation_and_cancel_keeps_history(self):
+        server = self.store.add({**FIELDS, "amount_kopeks": 10000})
+        await self.click(f"renew:{server['id']}:1")
+        await self.send("19.11.2026")
+        self.assertIn("сумм", self.session.messages[-1].text.lower())
+        self.assertEqual(len(self.store.payment_history(server["id"])), 1)
+        await self.send("1.001")
+        self.assertIn("двух", self.session.messages[-1].text)
+        await self.send("200,50")
+        preview = self.session.messages[-1].text
+        self.assertIn("20.10.2026", preview)
+        self.assertIn("300,50 ₽", preview)
+        await self.click(self.button("Отмена"))
+        self.assertEqual(self.store.get(server["id"])["total_paid_kopeks"], 10000)
+        self.assertEqual(len(self.store.payment_history(server["id"])), 1)
+
+    async def test_stale_renew_cannot_append_payment(self):
+        server = self.store.add({**FIELDS, "amount_kopeks": 10000})
+        await self.click(f"renew:{server['id']}:1")
+        await self.send("19.11.2026")
+        await self.send("200")
+        save = self.button("Сохранить")
+        self.store.update(server["id"], 1, {"name": "Changed"})
+        await self.click(save)
+        self.assertEqual(len(self.store.payment_history(server["id"])), 1)
+        self.assertIn("изменён", self.session.messages[-1].text)
+
+    async def test_edit_submenu_corrects_latest_amount_without_payment(self):
+        server = self.store.add({**FIELDS, "amount_kopeks": 10000})
+        self.store.renew(server["id"], 1, "2026-11-19", 20000)
+        await self.click(f"view:{server['id']}")
+        await self.click(self.button("Редактировать"))
+        await self.click(self.button("Стоимость последнего периода"))
+        await self.send("205,50")
+        await self.click(self.button("Сохранить"))
+        self.assertEqual(len(self.store.payment_history(server["id"])), 2)
+        self.assertEqual(self.store.get(server["id"])["total_paid_kopeks"], 30550)
+        await self.click(f"edit:{server['id']}:3:ends_on")
+        await self.send("19.10.2026")
+        self.assertIn("границ", self.session.messages[-1].text)
+        await self.send("20.11.2026")
+        await self.click(self.button("Сохранить"))
+        self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-11-20")
+
+    async def test_statistics_exports_active_and_archived_only_for_admins(self):
+        from io import BytesIO
+        from openpyxl import load_workbook
+        active = self.store.add({**FIELDS, "amount_kopeks": 10000})
+        archived = self.store.add({**FIELDS, "name": "Archived", "amount_kopeks": 20000})
+        self.store.delete(archived["id"], 1)
+        await self.click("stats:0")
+        actions = [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row]
+        self.assertIn(f"report:{active['id']}", actions)
+        self.assertIn(f"report:{archived['id']}", actions)
+        await self.click("report:all")
+        book = load_workbook(BytesIO(self.session.documents[-1].document.data))
+        self.assertEqual(book.sheetnames[:2], ["Сводка", "Удалённые"])
+        await self.click(f"report:{archived['id']}")
+        self.assertEqual(len(load_workbook(BytesIO(self.session.documents[-1].document.data)).worksheets), 1)
+        count = len(self.session.requests)
+        await self.click("report:all", admin=999)
+        await self.click("report:all", chat_type="group")
+        self.assertEqual(len(self.session.requests), count)
+
+    async def test_card_has_compact_actions_and_escaped_copyable_addresses(self):
+        server = self.store.add({**FIELDS, "name": "<VPN>", "amount_kopeks": 150050})
+        await self.click(f"view:{server['id']}")
+        message = self.session.messages[-1]
+        self.assertIn("&lt;VPN&gt;", message.text)
+        self.assertIn("<code>192.0.2.10</code>", message.text)
+        self.assertIn("<code>vpn.example.com</code>", message.text)
+        self.assertIn("1 500,50 ₽", message.text)
+        labels = [b.text for row in message.reply_markup.inline_keyboard for b in row]
+        self.assertEqual(labels[:4], ["Продлить", "Редактировать", "Скачать статистику", "Удалить"])
+        self.assertNotIn("Название сервера", labels)
+
+    async def test_incomplete_payment_totals_are_labeled(self):
+        server = self.store.add(FIELDS)
+        self.store.renew(server["id"], 1, "2026-11-19", 0)
+        await self.click(f"view:{server['id']}")
+        self.assertIn("0,00 ₽", self.session.messages[-1].text)
+        self.assertIn("неполный", self.session.messages[-1].text)
+
+    async def test_document_send_failure_preserves_payments(self):
+        self.store.add({**FIELDS, "amount_kopeks": 10000})
+        before = self.store.statistics()
+        self.session.document_failures[123] = lambda method: TelegramNetworkError(method, "offline")
+        with self.assertLogs("bot", level="ERROR"):
+            await self.click("report:all")
+        self.assertEqual(self.store.statistics(), before)
+        self.assertIn("Не удалось", self.session.messages[-1].text)
 
 
 if __name__ == "__main__":

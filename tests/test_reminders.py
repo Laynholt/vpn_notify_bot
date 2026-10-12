@@ -56,6 +56,13 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await self.tick()
         self.assertEqual(self.session.messages, [])
 
+    async def test_archived_server_is_not_notified_or_marked_delivered(self):
+        server = self.store.add(FIELDS)
+        self.store.delete(server["id"], 1)
+        await self.tick()
+        self.assertEqual(self.session.messages, [])
+        self.assertFalse(self.store.delivered(server["id"], server["ends_on"], 123, "2026-10-12"))
+
     async def test_restart_does_not_duplicate_but_next_day_sends(self):
         self.store.add(FIELDS)
         await self.tick()

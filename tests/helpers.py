@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import GetMe, GetWebhookInfo, SendMessage
+from aiogram.methods import GetMe, GetWebhookInfo, SendDocument, SendMessage
 from aiogram.types import Chat, Message, User, WebhookInfo
 
 
@@ -11,6 +11,7 @@ class TelegramSession(BaseSession):
         super().__init__()
         self.requests = []
         self.failures = {}
+        self.document_failures = {}
 
     async def close(self):
         pass
@@ -27,6 +28,11 @@ class TelegramSession(BaseSession):
             return Message(message_id=len(self.requests), date=datetime.now(timezone.utc),
                            chat=Chat(id=method.chat_id, type="private"), text=method.text,
                            reply_markup=method.reply_markup)
+        if isinstance(method, SendDocument):
+            if method.chat_id in self.document_failures:
+                raise self.document_failures[method.chat_id](method)
+            return Message(message_id=len(self.requests), date=datetime.now(timezone.utc),
+                           chat=Chat(id=method.chat_id, type="private"))
         return True
 
     async def stream_content(self, url, headers=None, timeout=30, chunk_size=65536,
@@ -36,6 +42,10 @@ class TelegramSession(BaseSession):
     @property
     def messages(self):
         return [method for method in self.requests if isinstance(method, SendMessage)]
+
+    @property
+    def documents(self):
+        return [method for method in self.requests if isinstance(method, SendDocument)]
 
 
 def telegram_bot():

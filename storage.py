@@ -24,6 +24,13 @@ def format_money(kopeks):
     return f"{rubles},{kopeks % 100:02d} ₽"
 
 
+def validate_payment_dates(fields, history):
+    first_end = fields["ends_on"] if len(history) == 1 else history[0]["ends_on"]
+    last_start = fields["starts_on"] if len(history) == 1 else history[-1]["starts_on"]
+    if fields["starts_on"] > first_end or fields["ends_on"] < last_start:
+        raise ValueError("Изменение дат нарушает границы оплаченных периодов. Проверьте историю в статистике.")
+
+
 def validate_field(field, value):
     value = value.strip()
     if field == "amount_kopeks":
@@ -190,10 +197,7 @@ class Storage:
             fields = validate_server({**saved, **fields}, allow_empty_addresses=True)
             history = self.payment_history(server_id)
             first, last = history[0], history[-1]
-            first_end = fields["ends_on"] if len(history) == 1 else first["ends_on"]
-            last_start = fields["starts_on"] if len(history) == 1 else last["starts_on"]
-            if fields["starts_on"] > first_end or fields["ends_on"] < last_start:
-                raise ValueError("Изменение дат нарушает границы оплаченных периодов. Проверьте историю в статистике.")
+            validate_payment_dates(fields, history)
             validate_amount(saved["total_paid_kopeks"] - (saved["amount_kopeks"] or 0) + (amount or 0))
             cursor = self.connection.execute(
                 """UPDATE servers SET name=?, hoster=?, website=?, ip_address=?, domain=?, starts_on=?, ends_on=?,
