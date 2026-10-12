@@ -44,6 +44,8 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await self.tick()
         self.assertEqual([msg.chat_id for msg in self.session.messages], [123, 456])
         self.assertIn("7", self.session.messages[0].text)
+        self.assertIn("192.0.2.10", self.session.messages[0].text)
+        self.assertIn("vpn.example.com", self.session.messages[0].text)
         actions = [button.callback_data for row in self.session.messages[0].reply_markup.inline_keyboard
                    for button in row if button.callback_data]
         self.assertFalse(any(action.startswith("delete:") for action in actions))

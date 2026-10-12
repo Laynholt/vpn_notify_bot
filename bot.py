@@ -1,4 +1,5 @@
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from html import escape
@@ -13,6 +14,7 @@ from storage import FIELDS, validate_field, validate_server
 
 
 LABELS = {"name": "Название сервера", "hoster": "Название хостера", "website": "Сайт хостера",
+          "ip_address": "IP-адрес", "domain": "Доменное имя",
           "starts_on": "Дата начала аренды", "ends_on": "Дата окончания оплаты"}
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,8 @@ class BotUI:
 
     async def list_servers(self, message, page, overview=False):
         servers = self.storage.list()
+        if overview:
+            servers.sort(key=lambda server: server["ends_on"])
         if not servers:
             await self.say(message, "У вас пока нет серверов. Добавим первый?",
                            keyboard([[("➕ Добавить сервер", "add")], [("🏠 Главное меню", "menu")]]))
@@ -75,7 +79,7 @@ class BotUI:
         page_servers = servers[page * 10:(page + 1) * 10]
         action = "servers" if overview else "list"
         rows = [[(item["name"][:60], f"view:{item['id']}")]
-                for item in page_servers]
+                for item in sorted(page_servers, key=lambda server: re.sub(r"^(?:[0-9]\ufe0f?\u20e3|\W)+", "", server["name"]).casefold())]
         navigation = []
         if page:
             navigation.append(("← Назад", f"{action}:{page - 1}"))
@@ -156,7 +160,7 @@ class BotUI:
                 if value < self.today().isoformat():
                     raise ValueError("Новая дата не может быть раньше сегодняшней.")
             if all(key in updated for key in FIELDS):
-                updated = validate_server(updated)
+                updated = validate_server(updated, allow_empty_addresses=draft.kind != "add")
         except ValueError as error:
             await self.say(message, f"{error}\n\nПродолжим с текущего поля: {LABELS[selected]}.",
                            self.form_keyboard(draft))

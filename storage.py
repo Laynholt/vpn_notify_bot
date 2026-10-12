@@ -1,15 +1,33 @@
 import re
 import sqlite3
 from datetime import date, datetime
+from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urlsplit
 
 
-FIELDS = ("name", "hoster", "website", "starts_on", "ends_on")
+FIELDS = ("name", "hoster", "website", "ip_address", "domain", "starts_on", "ends_on")
 
 
 def validate_field(field, value):
     value = value.strip()
+    if field == "ip_address":
+        try:
+            if "%" in value:
+                raise ValueError
+            return str(ip_address(value))
+        except ValueError:
+            raise ValueError("Введите корректный IPv4 или IPv6, без порта и маски подсети.") from None
+    if field == "domain":
+        try:
+            domain = value.lower().removesuffix(".").encode("idna").decode("ascii")
+        except UnicodeError:
+            domain = ""
+        labels = domain.split(".")
+        if (len(domain) > 253 or len(labels) < 2 or labels[-1].isdigit()
+                or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)):
+            raise ValueError("Введите доменное имя без https:// и пути, например vpn.example.com.")
+        return domain
     if field in ("starts_on", "ends_on"):
         if not re.fullmatch(r"[0-9]{2}\.[0-9]{2}\.[0-9]{4}", value):
             raise ValueError("Введите дату в формате ДД.ММ.ГГГГ.")
@@ -36,10 +54,13 @@ def validate_field(field, value):
     return value
 
 
-def validate_server(fields):
+def validate_server(fields, *, allow_empty_addresses=False):
     result = {}
     for field in FIELDS:
-        value = fields[field]
+        value = fields.get(field, "") if field in ("ip_address", "domain") else fields[field]
+        if allow_empty_addresses and field in ("ip_address", "domain") and value == "":
+            result[field] = ""
+            continue
         if field in ("starts_on", "ends_on"):
             try:
                 result[field] = date.fromisoformat(value).isoformat()
@@ -63,6 +84,7 @@ class Storage:
             CREATE TABLE IF NOT EXISTS servers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL, hoster TEXT NOT NULL, website TEXT NOT NULL,
+                ip_address TEXT NOT NULL DEFAULT '', domain TEXT NOT NULL DEFAULT '',
                 starts_on TEXT NOT NULL, ends_on TEXT NOT NULL,
                 version INTEGER NOT NULL DEFAULT 1
             );
@@ -72,6 +94,11 @@ class Storage:
                 PRIMARY KEY (server_id, ends_on, admin_id, day)
             );
         """)
+        columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(servers)")}
+        with self.connection:
+            for field in ("ip_address", "domain"):
+                if field not in columns:
+                    self.connection.execute(f"ALTER TABLE servers ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
 
     def close(self):
         self.connection.close()
@@ -87,7 +114,8 @@ class Storage:
         fields = validate_server(fields)
         with self.connection:
             cursor = self.connection.execute(
-                "INSERT INTO servers (name, hoster, website, starts_on, ends_on) VALUES (?, ?, ?, ?, ?)",
+                """INSERT INTO servers (name, hoster, website, ip_address, domain, starts_on, ends_on)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 tuple(fields[key] for key in FIELDS))
         return self.get(cursor.lastrowid)
 
@@ -95,10 +123,10 @@ class Storage:
         saved = self.get(server_id)
         if not saved or saved["version"] != version:
             return False
-        fields = validate_server({**saved, **fields})
+        fields = validate_server({**saved, **fields}, allow_empty_addresses=True)
         with self.connection:
             cursor = self.connection.execute(
-                """UPDATE servers SET name=?, hoster=?, website=?, starts_on=?, ends_on=?,
+                """UPDATE servers SET name=?, hoster=?, website=?, ip_address=?, domain=?, starts_on=?, ends_on=?,
                    version=version+1 WHERE id=? AND version=?""",
                 (*[fields[key] for key in FIELDS], server_id, version))
         return cursor.rowcount == 1

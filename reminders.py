@@ -19,6 +19,8 @@ def server_text(server):
     return (f"<b>{escape(server['name'])}</b>\n"
             f"Хостер: {escape(server['hoster'])}\n"
             f"Сайт: {escape(server['website'])}\n"
+            f"IP-адрес: {escape(server['ip_address'] or 'не указан')}\n"
+            f"Домен: {escape(server['domain'] or 'не указан')}\n"
             f"Оплачен: {display_date(server['starts_on'])} — {display_date(server['ends_on'])}")
 
 

@@ -10,7 +10,7 @@ from bot import create_dispatcher
 from config import Settings
 from helpers import telegram_bot
 from storage import Storage
-from test_core import FIELDS
+from test_core import FIELDS, create_legacy_database
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
@@ -66,17 +66,20 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_add_saves_only_after_confirmation(self):
         await self.click("add")
-        for text in ("VPN", "Host", "https://example.com", "01.10.2026", "19.10.2026"):
+        for text in ("VPN", "Host", "https://example.com", "192.0.2.10", "vpn.example.com", "01.10.2026", "19.10.2026"):
             await self.send(text)
         self.assertEqual(self.store.list(), [])
         await self.click(self.button("Сохранить"))
         self.assertEqual(self.store.list()[0]["ends_on"], "2026-10-19")
+        self.assertIn("192.0.2.10", self.session.messages[-1].text)
+        self.assertIn("vpn.example.com", self.session.messages[-1].text)
 
     async def test_invalid_input_keeps_step_and_period_is_validated(self):
         await self.click("add")
         await self.send("")
         self.assertIn("название", self.session.messages[-1].text.lower())
-        for text in ("VPN", "Host", "javascript:alert(1)", "https://example.com", "19.10.2026"):
+        for text in ("VPN", "Host", "javascript:alert(1)", "https://example.com",
+                     "bad IP", "192.0.2.10", "https://vpn.example.com", "vpn.example.com", "19.10.2026"):
             await self.send(text)
         await self.send("18.10.2026")
         self.assertIn("раньше", self.session.messages[-1].text)
@@ -90,7 +93,9 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send("My hoster")
         await self.send("hoster")
         await self.send("https://example.com")
-        self.assertIn("начала", self.session.messages[-1].text)
+        self.assertIn("IP", self.session.messages[-1].text)
+        await self.send("192.0.2.10")
+        await self.send("vpn.example.com")
         await self.send("01.10.2026")
         await self.send("19.10.2026")
         await self.click(self.button("Сохранить"))
@@ -98,6 +103,31 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server["name"], "First server")
         self.assertEqual(server["hoster"], "My hoster")
         self.assertEqual(server["website"], "https://example.com")
+
+    async def test_legacy_server_can_renew_and_edit_new_fields_separately(self):
+        await self.dispatcher.fsm.close()
+        self.store.close()
+        self.settings.database_path.unlink()
+        create_legacy_database(self.settings.database_path)
+        self.store = Storage(self.settings.database_path)
+        self.dispatcher = create_dispatcher(self.store, self.settings)
+        await self.click("view:7")
+        self.assertIn("IP-адрес: не указан", self.session.messages[-1].text)
+        self.assertIn("Домен: не указан", self.session.messages[-1].text)
+        await self.click("renew:7:4")
+        await self.send("19.11.2026")
+        await self.click(self.button("Сохранить"))
+        self.assertEqual(self.store.get(7)["ends_on"], "2026-11-19")
+        await self.click("edit:7:5:ip_address")
+        await self.send("invalid")
+        await self.send("2001:db8::1")
+        await self.click(self.button("Сохранить"))
+        self.assertEqual(self.store.get(7)["domain"], "")
+        await self.click("edit:7:6:domain")
+        await self.send("vpn.example.com")
+        await self.click(self.button("Сохранить"))
+        self.assertEqual(self.store.get(7)["ip_address"], "2001:db8::1")
+        self.assertEqual(self.store.get(7)["domain"], "vpn.example.com")
 
     async def test_my_servers_menu_lists_dates_and_opens_card(self):
         server = self.store.add({**FIELDS, "name": "<VPN>"})
@@ -129,6 +159,34 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("servers:1", actions)
         await self.click("servers:1")
         self.assertIn("19.10.2026", self.session.messages[-1].text)
+
+    async def test_my_servers_sorts_expiry_globally_before_pagination(self):
+        later = self.store.add({**FIELDS, "name": "Later", "ends_on": "2026-12-01"})
+        equal_expiry = []
+        for index in range(9):
+            equal_expiry.append(self.store.add({**FIELDS, "name": f"Soon {index}", "ends_on": "2026-10-13"}))
+        overdue = self.store.add({**FIELDS, "name": "Overdue", "ends_on": "2026-10-10"})
+        await self.click("servers:0")
+        actions = [button.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard
+                   for button in row if button.callback_data.startswith("view:")]
+        self.assertEqual(actions, [f"view:{overdue['id']}"] + [f"view:{row['id']}" for row in equal_expiry])
+        await self.click("servers:1")
+        actions = [button.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard
+                   for button in row if button.callback_data.startswith("view:")]
+        self.assertEqual(actions, [f"view:{later['id']}"])
+
+    async def test_overview_text_sorts_by_expiry_but_buttons_by_alphabet_without_flags(self):
+        alpha = self.store.add({**FIELDS, "name": "🇺🇸 Альфа", "ends_on": "2026-12-01"})
+        last = self.store.add({**FIELDS, "name": "🇩🇪 Яблоко", "ends_on": "2026-10-13"})
+        beta = self.store.add({**FIELDS, "name": "🇨🇦 бета", "ends_on": "2026-11-01"})
+        keycap = self.store.add({**FIELDS, "name": "1️⃣ Ясень", "ends_on": "2026-12-02"})
+        await self.click("servers:0")
+        message = self.session.messages[-1]
+        self.assertLess(message.text.index("Яблоко"), message.text.index("бета"))
+        self.assertLess(message.text.index("бета"), message.text.index("Альфа"))
+        actions = [button.callback_data for row in message.reply_markup.inline_keyboard
+                   for button in row if button.callback_data.startswith("view:")]
+        self.assertEqual(actions, [f"view:{alpha['id']}", f"view:{beta['id']}", f"view:{last['id']}", f"view:{keycap['id']}"])
 
     async def test_cancel_and_abandoned_renewal_leave_end_date_unchanged(self):
         server = self.store.add(FIELDS)
