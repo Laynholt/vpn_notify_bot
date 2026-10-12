@@ -18,6 +18,19 @@ from storage import Storage
 logger = logging.getLogger(__name__)
 
 
+def acquire_instance_lock(database_path):
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = sqlite3.connect(str(database_path) + ".run-lock.sqlite3", timeout=0)
+    try:
+        lock.execute("BEGIN EXCLUSIVE")
+    except sqlite3.OperationalError as error:
+        lock.close()
+        if error.sqlite_errorcode in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            raise ValueError("Бот уже запущен с этой базой. Остановите первый экземпляр.") from None
+        raise
+    return lock
+
+
 class RedactingFormatter(logging.Formatter):
     def __init__(self, secrets):
         super().__init__("%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -42,12 +55,16 @@ def configure_logging(settings):
 
 
 async def run(settings, check=False):
-    session = AiohttpSession(proxy=settings.proxy_url, timeout=20)
-    bot = Bot(settings.token, session=session)
+    session = None
+    instance_lock = None
     storage = None
     dispatcher = None
     tasks = []
     try:
+        if not check:
+            instance_lock = acquire_instance_lock(settings.database_path)
+        session = AiohttpSession(proxy=settings.proxy_url, timeout=20)
+        bot = Bot(settings.token, session=session)
         me = await bot.get_me()
         connection = "через прокси" if settings.proxy_url else "напрямую"
         logger.info("Telegram доступен: @%s, подключение %s.", me.username, connection)
@@ -76,7 +93,10 @@ async def run(settings, check=False):
             await dispatcher.fsm.close()
         if storage:
             storage.close()
-        await session.close()
+        if session:
+            await session.close()
+        if instance_lock:
+            instance_lock.close()
 
 
 def cli():

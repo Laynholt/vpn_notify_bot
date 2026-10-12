@@ -1,13 +1,14 @@
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
+from html import escape
 from secrets import token_hex
 
 from aiogram import BaseMiddleware, Dispatcher, Router
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
-from reminders import server_text
+from reminders import display_date, server_text
 from storage import FIELDS, validate_field, validate_server
 
 
@@ -21,7 +22,8 @@ def keyboard(rows):
         [InlineKeyboardButton(text=text, callback_data=data) for text, data in row] for row in rows])
 
 
-MENU = keyboard([[('Добавить сервер', 'add')], [('Изменить сервер', 'list:0')]])
+MENU = keyboard([[('➕ Добавить сервер', 'add')], [('✏️ Изменить сервер', 'list:0')],
+                 [('🖥 Мои сервера', 'servers:0')]])
 
 
 class AdminOnly(BaseMiddleware):
@@ -61,25 +63,37 @@ class BotUI:
 
     async def menu(self, message, admin_id):
         self.drafts.pop(admin_id, None)
-        await self.say(message, "Управление оплатой серверов", MENU)
+        await self.say(message, "🏠 Главное меню\nУправление оплатой серверов", MENU)
 
-    async def list_servers(self, message, page):
+    async def list_servers(self, message, page, overview=False):
         servers = self.storage.list()
         if not servers:
-            await self.say(message, "Серверов пока нет.", MENU)
+            await self.say(message, "У вас пока нет серверов. Добавим первый?",
+                           keyboard([[("➕ Добавить сервер", "add")], [("🏠 Главное меню", "menu")]]))
             return
         page = min(max(page, 0), (len(servers) - 1) // 10)
+        page_servers = servers[page * 10:(page + 1) * 10]
+        action = "servers" if overview else "list"
         rows = [[(item["name"][:60], f"view:{item['id']}")]
-                for item in servers[page * 10:(page + 1) * 10]]
+                for item in page_servers]
         navigation = []
         if page:
-            navigation.append(("← Назад", f"list:{page - 1}"))
+            navigation.append(("← Назад", f"{action}:{page - 1}"))
         if (page + 1) * 10 < len(servers):
-            navigation.append(("Далее →", f"list:{page + 1}"))
+            navigation.append(("Далее →", f"{action}:{page + 1}"))
         if navigation:
             rows.append(navigation)
-        rows.append([("Главное меню", "menu")])
-        await self.say(message, f"Выберите сервер (страница {page + 1}):", keyboard(rows))
+        rows.append([("🏠 Главное меню", "menu")])
+        if overview:
+            lines = []
+            for server in page_servers:
+                remaining = (date.fromisoformat(server["ends_on"]) - self.today()).days
+                status = f"осталось {remaining} дн." if remaining >= 0 else f"просрочен на {-remaining} дн."
+                lines.append(f"<b>{escape(server['name'][:50])}</b> — до {display_date(server['ends_on'])}, {status}")
+            text = f"🖥 Мои сервера (страница {page + 1})\n\n" + "\n\n".join(lines)
+        else:
+            text = f"✏️ Выберите сервер для изменения (страница {page + 1}):"
+        await self.say(message, text, keyboard(rows))
 
     async def card(self, message, server_id):
         server = self.storage.get(server_id)
@@ -89,7 +103,7 @@ class BotUI:
         identity = f"{server['id']}:{server['version']}"
         rows = [[(label, f"edit:{identity}:{key}")] for key, label in LABELS.items()]
         rows.extend([[("Продлил", f"renew:{identity}"), ("Удалить", f"delete:{identity}")],
-                     [("К списку", "list:0"), ("Главное меню", "menu")]])
+                     [("🖥 Мои сервера", "servers:0"), ("🏠 Главное меню", "menu")]])
         await self.say(message, server_text(server), keyboard(rows))
 
     def form_keyboard(self, draft, confirm=False):
@@ -117,7 +131,7 @@ class BotUI:
     async def stale(self, message, admin_id, server_id):
         self.drafts.pop(admin_id, None)
         await self.say(message, "Сервер уже изменён или удалён. Откройте актуальные данные.",
-                       keyboard([[("Открыть сервер", f"view:{server_id}")], [("Главное меню", "menu")]]))
+                       keyboard([[("Открыть сервер", f"view:{server_id}")], [("🏠 Главное меню", "menu")]]))
 
     async def on_message(self, message):
         admin_id = message.from_user.id
@@ -144,7 +158,8 @@ class BotUI:
             if all(key in updated for key in FIELDS):
                 updated = validate_server(updated)
         except ValueError as error:
-            await self.say(message, str(error), self.form_keyboard(draft))
+            await self.say(message, f"{error}\n\nПродолжим с текущего поля: {LABELS[selected]}.",
+                           self.form_keyboard(draft))
             return
         draft.values = updated
         if draft.kind == "add" and selected != FIELDS[-1]:
@@ -201,10 +216,10 @@ class BotUI:
                 await self.menu(message, admin_id)
             elif draft.ready:
                 await self.save(message, admin_id, draft)
-        elif action in ("list", "view") and len(parts) == 2 and parts[1].isdigit():
+        elif action in ("list", "servers", "view") and len(parts) == 2 and parts[1].isdigit():
             self.drafts.pop(admin_id, None)
-            if action == "list":
-                await self.list_servers(message, int(parts[1]))
+            if action in ("list", "servers"):
+                await self.list_servers(message, int(parts[1]), overview=action == "servers")
             else:
                 await self.card(message, int(parts[1]))
         elif (action in ("edit", "renew", "delete") and len(parts) == (4 if action == "edit" else 3)

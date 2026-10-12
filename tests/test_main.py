@@ -12,6 +12,25 @@ from main import RedactingFormatter, run
 
 
 class StartupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_second_instance_is_rejected_before_telegram_and_lock_releases(self):
+        from main import acquire_instance_lock
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / ".env").write_text("BOT_TOKEN=123:abc\nADMIN_IDS=123", encoding="utf-8")
+            settings = Settings.load(base)
+            first = acquire_instance_lock(settings.database_path)
+            try:
+                session = TelegramSession()
+                with patch("main.AiohttpSession", return_value=session):
+                    with self.assertRaisesRegex(ValueError, "уже запущен"):
+                        await run(settings)
+                self.assertEqual(session.requests, [])
+                self.assertFalse(settings.database_path.exists())
+            finally:
+                first.close()
+            next_instance = acquire_instance_lock(settings.database_path)
+            next_instance.close()
+
     async def test_check_connects_through_configured_proxy_without_creating_database(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

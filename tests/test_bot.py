@@ -84,6 +84,52 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click(self.button("Сохранить"))
         self.assertEqual(self.store.list()[0]["ends_on"], "2026-10-20")
 
+    async def test_word_then_valid_site_preserves_all_previously_entered_fields(self):
+        await self.click("add")
+        await self.send("First server")
+        await self.send("My hoster")
+        await self.send("hoster")
+        await self.send("https://example.com")
+        self.assertIn("начала", self.session.messages[-1].text)
+        await self.send("01.10.2026")
+        await self.send("19.10.2026")
+        await self.click(self.button("Сохранить"))
+        server = self.store.list()[0]
+        self.assertEqual(server["name"], "First server")
+        self.assertEqual(server["hoster"], "My hoster")
+        self.assertEqual(server["website"], "https://example.com")
+
+    async def test_my_servers_menu_lists_dates_and_opens_card(self):
+        server = self.store.add({**FIELDS, "name": "<VPN>"})
+        await self.send("/start")
+        actions = [button.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard
+                   for button in row]
+        self.assertIn("servers:0", actions)
+        await self.click("servers:0")
+        message = self.session.messages[-1]
+        self.assertIn("&lt;VPN&gt;", message.text)
+        self.assertIn("19.10.2026", message.text)
+        await self.click(message.reply_markup.inline_keyboard[0][0].callback_data)
+        self.assertIn("https://example.com", self.session.messages[-1].text)
+        self.assertEqual(self.store.get(server["id"])["version"], 1)
+
+    async def test_empty_edit_list_only_offers_add_and_main_menu(self):
+        await self.click("list:0")
+        actions = [button.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard
+                   for button in row]
+        self.assertEqual(actions, ["add", "menu"])
+
+    async def test_my_servers_pagination_preserves_overview_and_telegram_length(self):
+        for index in range(11):
+            self.store.add({**FIELDS, "name": '"' * 90 + str(index)})
+        await self.click("servers:0")
+        message = self.session.messages[-1]
+        self.assertLessEqual(len(message.text), 4096)
+        actions = [button.callback_data for row in message.reply_markup.inline_keyboard for button in row]
+        self.assertIn("servers:1", actions)
+        await self.click("servers:1")
+        self.assertIn("19.10.2026", self.session.messages[-1].text)
+
     async def test_cancel_and_abandoned_renewal_leave_end_date_unchanged(self):
         server = self.store.add(FIELDS)
         await self.click(f"renew:{server['id']}:1")

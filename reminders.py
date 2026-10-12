@@ -25,6 +25,7 @@ def server_text(server):
 def reminder_keyboard(server, today):
     identity = f"{server['id']}:{server['version']}"
     rows = [[InlineKeyboardButton(text="Продлил", callback_data=f"renew:{identity}")]]
+    rows.append([InlineKeyboardButton(text="🌐 Открыть хостер", url=server["website"])])
     if date.fromisoformat(server["ends_on"]) < today:
         rows.append([InlineKeyboardButton(text="Удалить", callback_data=f"delete:{identity}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)

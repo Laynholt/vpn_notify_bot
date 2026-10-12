@@ -44,7 +44,9 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await self.tick()
         self.assertEqual([msg.chat_id for msg in self.session.messages], [123, 456])
         self.assertIn("7", self.session.messages[0].text)
-        self.assertEqual(len(self.session.messages[0].reply_markup.inline_keyboard), 1)
+        actions = [button.callback_data for row in self.session.messages[0].reply_markup.inline_keyboard
+                   for button in row if button.callback_data]
+        self.assertFalse(any(action.startswith("delete:") for action in actions))
         self.assertTrue(self.store.delivered(server["id"], "2026-10-19", 123, "2026-10-12"))
 
     async def test_eight_days_away_is_not_due(self):
@@ -66,7 +68,8 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await self.tick()
         self.assertIn("Просрочен", self.session.messages[0].text)
         buttons = self.session.messages[0].reply_markup.inline_keyboard
-        self.assertEqual(buttons[1][0].text, "Удалить")
+        self.assertTrue(any(button.callback_data and button.callback_data.startswith("delete:")
+                            for row in buttons for button in row))
         self.notifier = Notifier(self.bot, self.store, replace(self.settings, notify_overdue=False))
         self.session.requests.clear()
         await self.tick(day=13)
@@ -124,6 +127,17 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         server = self.store.add({**FIELDS, "name": "<b>VPN</b>"})
         self.assertIn("&lt;b&gt;VPN&lt;/b&gt;", server_text(server))
         self.assertNotIn("<b>VPN</b>", server_text(server))
+
+    async def test_due_and_overdue_notifications_link_to_hoster(self):
+        server = self.store.add(FIELDS)
+        for day in (12, 20):
+            with self.subTest(day=day):
+                await self.tick(day=day)
+                buttons = [button for row in self.session.messages[-1].reply_markup.inline_keyboard
+                           for button in row]
+                links = [button for button in buttons if button.url]
+                self.assertEqual([button.url for button in links], ["https://example.com"])
+                self.assertTrue(any(button.callback_data == f"renew:{server['id']}:1" for button in buttons))
 
     async def test_midnight_uses_local_calendar_day(self):
         server = self.store.add(FIELDS)
