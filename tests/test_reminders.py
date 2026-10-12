@@ -1,9 +1,11 @@
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
+from zoneinfo import ZoneInfo
 
 from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
 
@@ -96,6 +98,19 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await self.notifier.tick(datetime(2026, 10, 12, 9, 3, tzinfo=timezone.utc))
         self.assertEqual(len(self.session.messages), 3)
 
+    async def test_retry_after_starts_when_error_arrives_in_slow_batch(self):
+        self.store.add(FIELDS)
+        self.session.failures[123] = lambda method: TelegramRetryAfter(method, "flood", 120)
+        # Ошибка возникает спустя 61 секунду после начала проверки.
+        clock = SimpleNamespace(monotonic=Mock(side_effect=[0, 61]))
+        with patch("reminders.time", clock, create=True), self.assertLogs("reminders", level="WARNING"):
+            await self.tick()
+        del self.session.failures[123]
+        await self.notifier.tick(datetime(2026, 10, 12, 9, 2, 30, tzinfo=timezone.utc))
+        self.assertEqual(len(self.session.messages), 2)
+        await self.notifier.tick(datetime(2026, 10, 12, 9, 4, tzinfo=timezone.utc))
+        self.assertEqual(len(self.session.messages), 3)
+
     async def test_new_server_after_schedule_and_new_period_are_checked(self):
         await self.tick()
         server = self.store.add({**FIELDS, "ends_on": "2026-10-12"})
@@ -109,6 +124,31 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         server = self.store.add({**FIELDS, "name": "<b>VPN</b>"})
         self.assertIn("&lt;b&gt;VPN&lt;/b&gt;", server_text(server))
         self.assertNotIn("<b>VPN</b>", server_text(server))
+
+    async def test_midnight_uses_local_calendar_day(self):
+        server = self.store.add(FIELDS)
+        settings = replace(self.settings, notify_time=time(0, 0))
+        notifier = Notifier(self.bot, self.store, settings)
+        await notifier.tick(datetime(2026, 10, 12, 21, 1, tzinfo=timezone.utc))
+        self.assertTrue(self.store.delivered(server["id"], server["ends_on"], 123, "2026-10-13"))
+        self.assertFalse(self.store.delivered(server["id"], server["ends_on"], 123, "2026-10-12"))
+
+    async def test_dst_repeated_hour_does_not_duplicate_delivery(self):
+        self.store.add({**FIELDS, "ends_on": "2026-11-07"})
+        settings = replace(self.settings, notify_time=time(1, 30), timezone=ZoneInfo("America/New_York"))
+        notifier = Notifier(self.bot, self.store, settings)
+        await notifier.tick(datetime(2026, 11, 1, 5, 35, tzinfo=timezone.utc))
+        await notifier.tick(datetime(2026, 11, 1, 6, 35, tzinfo=timezone.utc))
+        self.assertEqual(len(self.session.messages), 2)
+
+    async def test_dst_missing_hour_sends_after_clock_jumps_forward(self):
+        self.store.add({**FIELDS, "starts_on": "2026-03-01", "ends_on": "2026-04-05"})
+        settings = replace(self.settings, notify_time=time(2, 30), timezone=ZoneInfo("Europe/Berlin"))
+        notifier = Notifier(self.bot, self.store, settings)
+        await notifier.tick(datetime(2026, 3, 29, 0, 59, tzinfo=timezone.utc))
+        self.assertEqual(self.session.messages, [])
+        await notifier.tick(datetime(2026, 3, 29, 1, 5, tzinfo=timezone.utc))
+        self.assertEqual(len(self.session.messages), 2)
 
 
 if __name__ == "__main__":

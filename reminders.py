@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 
@@ -38,6 +39,7 @@ class Notifier:
         local = now.astimezone(self.settings.timezone)
         if local.time().replace(tzinfo=None) < self.settings.notify_time:
             return
+        started = time.monotonic()
         today = local.date()
         for snapshot in self.storage.list():
             for admin_id in self.settings.admin_ids:
@@ -67,7 +69,7 @@ class Notifier:
                     delay = error.retry_after if isinstance(error, TelegramRetryAfter) else 60
                     if isinstance(error, TelegramForbiddenError):
                         delay = 3600
-                    self.retry_at[admin_id] = now + timedelta(seconds=delay)
+                    self.retry_at[admin_id] = now + timedelta(seconds=delay + time.monotonic() - started)
                     logger.warning("Не доставлено: сервер %s, администратор %s, %s",
                                    server["id"], admin_id, type(error).__name__)
                 else:
