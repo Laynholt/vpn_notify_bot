@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 import storage
@@ -112,6 +113,43 @@ class HistoryTests(unittest.TestCase):
         for amount in (1.5, True, -1, 10**30):
             with self.subTest(amount=amount), self.assertRaises(ValueError):
                 self.store.add({**FIELDS, "amount_kopeks": amount})
+
+    def test_bonus_migration_and_updates_keep_correct_annotation(self):
+        server = self.store.add({**FIELDS, "amount_kopeks": 0})
+        for _ in range(2):
+            self.store.close()
+            self.store = Storage(self.path)
+            self.assertEqual(self.store.get(server["id"])["paid_with_bonus"], 0)
+            self.assertEqual(len(self.store.payment_history(server["id"])), 1)
+        with self.store.connection:
+            self.store.connection.execute("UPDATE payments SET paid_with_bonus=1 WHERE server_id=?", (server["id"],))
+        saved = self.store.get(server["id"])
+        self.store.update(server["id"], 1, {**saved, "name": "New name"})
+        self.assertEqual(self.store.get(server["id"])["paid_with_bonus"], 1)
+        self.store.update(server["id"], 2, {"amount_kopeks": 10000})
+        self.assertEqual(self.store.get(server["id"])["paid_with_bonus"], 0)
+        self.store.renew(server["id"], 3, "2026-11-19", 0)
+        self.assertEqual(self.store.payment_history(server["id"])[-1]["paid_with_bonus"], 0)
+
+    def test_bonus_migration_preserves_existing_payment_table(self):
+        self.store.close()
+        self.path.unlink()
+        create_legacy_database(self.path)
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.executescript("""CREATE TABLE payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL REFERENCES servers(id),
+                starts_on TEXT NOT NULL, ends_on TEXT NOT NULL, amount_kopeks INTEGER);
+                INSERT INTO payments VALUES (12, 7, '2026-10-01', '2026-10-19', 150050);""")
+        for _ in range(2):
+            self.store = Storage(self.path)
+            history = self.store.payment_history(7)
+            self.assertEqual(len(history), 1)
+            self.assertEqual((history[0]["id"], history[0]["amount_kopeks"], history[0].get("paid_with_bonus")),
+                             (12, 150050, 0))
+            self.assertEqual(self.store.get(7)["version"], 4)
+            self.assertTrue(self.store.delivered(7, "2026-10-19", 123, "2026-10-12"))
+            self.store.close()
+        self.store = Storage(self.path)
 
 
 if __name__ == "__main__":

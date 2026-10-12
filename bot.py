@@ -12,7 +12,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton
 
 from reminders import display_date, server_text
 from reports import build_report
-from storage import FIELDS, validate_amount, validate_field, validate_payment_dates, validate_server
+from storage import FIELDS, format_money, validate_amount, validate_field, validate_payment_dates, validate_server
 
 
 LABELS = {"name": "Название сервера", "hoster": "Название хостера", "website": "Сайт хостера",
@@ -116,6 +116,12 @@ class BotUI:
 
     async def list_statistics(self, message, page):
         servers = self.storage.statistics()
+        active = [server for server in servers if not server["deleted_at"]]
+        total = sum(server["total_paid_kopeks"] for server in servers)
+        active_total = sum(server["total_paid_kopeks"] for server in active)
+        unknown = sum(server["unknown_payments"] for server in servers)
+        periods = sum(len(server["payments"]) for server in servers)
+        bonus = sum(payment["paid_with_bonus"] for server in servers for payment in server["payments"])
         page = min(max(page, 0), max(0, (len(servers) - 1) // 10))
         rows = [[("Скачать по всем серверам", "report:all")]]
         for server in servers[page * 10:(page + 1) * 10]:
@@ -129,8 +135,17 @@ class BotUI:
         if navigation:
             rows.append(navigation)
         rows.append([("🏠 Главное меню", "menu")])
-        await self.say(message, f"📊 Статистика (страница {page + 1})\n"
-                       "Выберите сервер или скачайте общую историю оплат. Удалённые серверы сохранены в архиве.", keyboard(rows))
+        text = ("📊 <b>Статистика серверов</b>\n\n"
+                f"<b>Расходы за всё время</b>\nУчтено: <b>{format_money(total)}</b>\n"
+                f"Активные серверы: {format_money(active_total)}\n"
+                f"Архив: {format_money(total - active_total)}\n\n"
+                f"<b>Серверы</b>\nАктивных: <b>{len(active)}</b>\nВ архиве: <b>{len(servers) - len(active)}</b>\n\n"
+                f"<b>История оплат</b>\nПериодов: <b>{periods}</b>\nБонусами оплачено: <b>{bonus}</b>\n"
+                f"Периодов без суммы: <b>{unknown}</b>")
+        if unknown:
+            text += "\n⚠️ Итог неполный: учтены только известные суммы."
+        text += f"\n\n<b>Выгрузка в Excel · страница {page + 1}</b>\nВыберите сервер или скачайте общую историю оплат."
+        await self.say(message, text, keyboard(rows))
 
     async def send_statistics(self, message, server_id=None):
         servers = self.storage.statistics(server_id)
@@ -201,6 +216,8 @@ class BotUI:
                     if len(history) == 1:
                         updated["payment_starts_on"] = updated["starts_on"]
             if selected == "amount_kopeks":
+                if draft.kind == "renew" or value != draft.values.get("amount_kopeks"):
+                    updated["paid_with_bonus"] = 0
                 if draft.kind == "add":
                     updated.update(total_paid_kopeks=value, known_payments=1, unknown_payments=0)
                 elif draft.kind == "renew":

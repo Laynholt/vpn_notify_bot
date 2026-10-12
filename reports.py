@@ -68,16 +68,17 @@ def build_report(servers, *, single=False):
                              ("Удалён", date.fromisoformat(server["deleted_at"][:10]) if server["deleted_at"] else "—")):
             append_row(sheet, [label, value])
         append_row(sheet, [])
-        header(sheet, ["Начало периода", "Конец периода", "Оплачено, ₽"])
+        header(sheet, ["Начало периода", "Конец периода", "Оплачено, ₽", "Оплата бонусами"])
         for payment in server["payments"]:
             append_row(sheet, [date.fromisoformat(payment["starts_on"]), date.fromisoformat(payment["ends_on"]),
-                              payment["amount_kopeks"] / 100 if payment["amount_kopeks"] is not None else "не указано"],
+                              payment["amount_kopeks"] / 100 if payment["amount_kopeks"] is not None else "не указано",
+                              "Оплачено бонусами" if payment["paid_with_bonus"] else ""],
                        money_columns=(3,))
         append_row(sheet, ["Всего учтено, ₽", server["total_paid_kopeks"] / 100], money_columns=(2,))
         append_row(sheet, ["Периодов без суммы", server["unknown_payments"]])
         if server["unknown_payments"]:
             append_row(sheet, ["Итог неполный: учтены только известные суммы."])
-        for column, width in zip("ABC", (32, 45, 25)):
+        for column, width in zip("ABCD", (32, 45, 25, 28)):
             sheet.column_dimensions[column].width = width
     if not book.worksheets:
         append_row(book.create_sheet("Статистика"), ["Нет серверов"])

@@ -365,6 +365,55 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.payment_history(server["id"])[0]["starts_on"], "2026-10-06")
         self.assertEqual(self.store.get(server["id"])["payment_starts_on"], "2026-10-20")
 
+    async def test_statistics_card_totals_include_archive_and_all_pages(self):
+        self.store.add({**FIELDS, "amount_kopeks": 10050})
+        archived = self.store.add({**FIELDS, "amount_kopeks": 20025})
+        self.store.delete(archived["id"], 1)
+        self.store.add(FIELDS)
+        for index in range(9):
+            self.store.add({**FIELDS, "name": str(index), "amount_kopeks": 0})
+        for page in (0, 1):
+            await self.click(f"stats:{page}")
+            text = self.session.messages[-1].text
+            self.assertIn("300,75 ₽", text)
+            self.assertIn("200,25 ₽", text)
+            self.assertIn("Активных: <b>11</b>", text)
+            self.assertIn("В архиве: <b>1</b>", text)
+            self.assertIn("Периодов без суммы: <b>1</b>", text)
+            self.assertIn("итог неполный", text.lower())
+            self.assertIn("<b>Расходы за всё время</b>", text)
+
+    async def test_bonus_card_and_price_correction_preview(self):
+        server = self.store.add({**FIELDS, "amount_kopeks": 0})
+        with self.store.connection:
+            self.store.connection.execute("UPDATE payments SET paid_with_bonus=1 WHERE server_id=?", (server["id"],))
+        await self.click(f"view:{server['id']}")
+        self.assertIn("Оплачено бонусами", self.session.messages[-1].text)
+        await self.click("stats:0")
+        self.assertIn("Бонусами оплачено: <b>1</b>", self.session.messages[-1].text)
+        await self.click(f"edit:{server['id']}:1:amount_kopeks")
+        await self.send("100")
+        self.assertNotIn("Оплачено бонусами", self.session.messages[-1].text)
+        await self.click(self.button("Сохранить"))
+        self.assertEqual(self.store.get(server["id"])["paid_with_bonus"], 0)
+
+    async def test_bonus_metadata_and_zero_price_edit_preserve_note_but_renewal_does_not(self):
+        server = self.store.add({**FIELDS, "amount_kopeks": 0})
+        with self.store.connection:
+            self.store.connection.execute("UPDATE payments SET paid_with_bonus=1 WHERE server_id=?", (server["id"],))
+        for version, field, value in ((1, "name", "New name"), (2, "amount_kopeks", "0")):
+            await self.click(f"edit:{server['id']}:{version}:{field}")
+            await self.send(value)
+            self.assertIn("Оплачено бонусами", self.session.messages[-1].text)
+            await self.click(self.button("Сохранить"))
+            self.assertEqual(self.store.get(server["id"])["paid_with_bonus"], 1)
+        await self.click(f"renew:{server['id']}:3")
+        await self.send("19.11.2026")
+        await self.send("0")
+        self.assertNotIn("Оплачено бонусами", self.session.messages[-1].text)
+        await self.click(self.button("Сохранить"))
+        self.assertEqual([p["paid_with_bonus"] for p in self.store.payment_history(server["id"])], [1, 0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@ def server_text(server, *, today=None):
     status = f"🟢 Оплачен · осталось {remaining} дн." if remaining > 0 else (
         "🟡 Оплата заканчивается сегодня" if remaining == 0 else f"🔴 Просрочен на {-remaining} дн.")
     amount = server.get("amount_kopeks")
+    bonus = " · Оплачено бонусами" if server.get("paid_with_bonus") else ""
     known = server.get("known_payments", int(amount is not None))
     unknown = server.get("unknown_payments", int(amount is None))
     total = format_money(server.get("total_paid_kopeks", amount or 0)) if known else "не указано"
@@ -37,7 +38,7 @@ def server_text(server, *, today=None):
             f"<b>Подключение</b>\nIP-адрес: {ip}\nДомен: {domain}\n\n"
             f"<b>Последний оплаченный период</b>\n"
             f"📅 {display_date(starts_on)} — {display_date(server['ends_on'])}\n{status}{rental}\n\n"
-            f"<b>Расходы</b>\nЗа период: {format_money(amount)}\nВсего оплачено: {total}")
+            f"<b>Расходы</b>\nЗа период: {format_money(amount)}{bonus}\nВсего оплачено: {total}")
 
 
 def reminder_keyboard(server, today):

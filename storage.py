@@ -133,10 +133,15 @@ class Storage:
                 server_id INTEGER NOT NULL REFERENCES servers(id),
                 starts_on TEXT NOT NULL, ends_on TEXT NOT NULL,
                 amount_kopeks INTEGER,
+                paid_with_bonus INTEGER NOT NULL DEFAULT 0 CHECK (paid_with_bonus IN (0, 1)),
                 CHECK (ends_on >= starts_on),
                 CHECK (amount_kopeks IS NULL OR
                        (typeof(amount_kopeks)='integer' AND amount_kopeks >= 0 AND amount_kopeks <= 99999999999999))
             )""")
+            payment_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(payments)")}
+            if "paid_with_bonus" not in payment_columns:
+                self.connection.execute("""ALTER TABLE payments ADD COLUMN
+                    paid_with_bonus INTEGER NOT NULL DEFAULT 0 CHECK (paid_with_bonus IN (0, 1))""")
             self.connection.execute("CREATE INDEX IF NOT EXISTS payments_server ON payments(server_id, id)")
             self.connection.execute("""INSERT INTO payments (server_id, starts_on, ends_on)
                 SELECT id, starts_on, ends_on FROM servers
@@ -162,6 +167,7 @@ class Storage:
         payments = self.payment_history(server["id"])
         amounts = [payment["amount_kopeks"] for payment in payments if payment["amount_kopeks"] is not None]
         server.update(payment_starts_on=payments[-1]["starts_on"], amount_kopeks=payments[-1]["amount_kopeks"],
+                      paid_with_bonus=payments[-1]["paid_with_bonus"],
                       total_paid_kopeks=sum(amounts), known_payments=len(amounts),
                       unknown_payments=len(payments) - len(amounts))
         if include_history:
@@ -194,6 +200,7 @@ class Storage:
             if not saved or saved["version"] != version:
                 return False
             amount = validate_amount(fields.get("amount_kopeks", saved["amount_kopeks"]))
+            paid_with_bonus = saved["paid_with_bonus"] if amount == saved["amount_kopeks"] == 0 else 0
             fields = validate_server({**saved, **fields}, allow_empty_addresses=True)
             history = self.payment_history(server_id)
             first, last = history[0], history[-1]
@@ -204,8 +211,8 @@ class Storage:
                    version=version+1 WHERE id=? AND version=? AND deleted_at IS NULL""",
                 (*[fields[key] for key in FIELDS], server_id, version))
             self.connection.execute("UPDATE payments SET starts_on=? WHERE id=?", (fields["starts_on"], first["id"]))
-            self.connection.execute("UPDATE payments SET ends_on=?, amount_kopeks=? WHERE id=?",
-                                    (fields["ends_on"], amount, last["id"]))
+            self.connection.execute("UPDATE payments SET ends_on=?, amount_kopeks=?, paid_with_bonus=? WHERE id=?",
+                                    (fields["ends_on"], amount, paid_with_bonus, last["id"]))
         return cursor.rowcount == 1
 
     def renew(self, server_id, version, ends_on, amount_kopeks):

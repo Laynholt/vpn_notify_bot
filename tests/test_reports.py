@@ -73,6 +73,15 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(snapshot, expected)
         self.assertEqual(self.store.statistics(), expected)
 
+    def test_bonus_payment_is_zero_with_explicit_note(self):
+        server = self.store.add({**FIELDS, "amount_kopeks": 0})
+        with self.store.connection:
+            self.store.connection.execute("UPDATE payments SET paid_with_bonus=1 WHERE server_id=?", (server["id"],))
+        book = read_report(self.store.statistics(server["id"]), single=True)
+        rows = list(book.worksheets[0].values)
+        payment = next(row for row in rows if len(row) > 3 and row[3] == "Оплачено бонусами")
+        self.assertEqual(payment[2], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
