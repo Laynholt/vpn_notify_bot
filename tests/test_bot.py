@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
-from aiogram.exceptions import TelegramNetworkError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
+from aiogram.methods import DeleteMessage, EditMessageReplyMarkup, EditMessageText, SendMessage
 
 from bot import create_dispatcher
 from config import Settings
@@ -41,21 +42,185 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                           from_user=User(id=admin, is_bot=False, first_name="Admin"), text=text)
         await self.dispatcher.feed_update(self.bot, Update(update_id=self.update_id, message=message))
 
-    async def click(self, data, admin=123, chat_type="private"):
+    async def click(self, data, admin=123, chat_type="private", message=None):
         self.update_id += 1
-        message = Message(message_id=self.update_id, date=datetime.now(timezone.utc),
+        if message is None:
+            previous = [item for item in self.session.sent_messages.values() if item.chat.id == admin and item.text]
+            message = max(previous, key=lambda item: item.message_id) if previous else None
+        message = message or Message(message_id=self.update_id, date=datetime.now(timezone.utc),
                           chat=Chat(id=admin, type=chat_type),
                           from_user=User(id=self.bot.id, is_bot=True, first_name="Bot"), text="Buttons")
+        message = message.model_copy(update={"chat": Chat(id=admin, type=chat_type)})
         callback = CallbackQuery(id=str(self.update_id), from_user=User(id=admin, is_bot=False,
                                   first_name="Admin"), chat_instance="test", data=data, message=message)
         await self.dispatcher.feed_update(self.bot, Update(update_id=self.update_id, callback_query=callback))
 
     def button(self, text):
+        self.assertIsNotNone(self.session.messages[-1].reply_markup, "Panel keyboard is missing")
         for row in self.session.messages[-1].reply_markup.inline_keyboard:
             for button in row:
                 if button.text == text:
                     return button.callback_data
         self.fail(f"No button {text}")
+
+    async def test_navigation_and_complete_add_reuse_one_panel_and_delete_input_after_render(self):
+        await self.send("/start")
+        panel_id = max(self.session.sent_messages)[1]
+        for action in ("stats:0", "stats:active:0", "menu", "add"):
+            await self.click(action)
+        for value in ("VPN", "Host", "https://example.com", "192.0.2.10", "vpn.example.com",
+                      "01.10.2026", "19.10.2026", "1500,50"):
+            await self.send(value)
+            self.assertIsInstance(self.session.requests[-2], EditMessageText)
+            self.assertIsInstance(self.session.requests[-1], DeleteMessage)
+            self.assertEqual(self.session.requests[-1].message_id, self.update_id)
+        before = len(self.session.requests)
+        await self.click(self.button("Сохранить"))
+        self.assertEqual(len(self.store.list()), 1)
+        self.assertEqual(sum(isinstance(request, EditMessageText) for request in self.session.requests[before:]), 1)
+        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 1)
+        self.assertEqual({request.message_id for request in self.session.requests if isinstance(request, EditMessageText)}, {panel_id})
+
+    async def test_invalid_input_is_deleted_after_error_and_delete_failures_keep_form_working(self):
+        await self.send("/start")
+        await self.click("add")
+        await self.send("")
+        self.assertIn("название", self.session.messages[-1].text.lower())
+        self.assertIsInstance(self.session.requests[-1], DeleteMessage)
+        for error in (TelegramBadRequest, TelegramForbiddenError):
+            self.session.delete_failures[123] = lambda method, error=error: error(method, "cannot delete")
+            with self.assertLogs("bot", level="WARNING"):
+                await self.send("VPN" if error is TelegramBadRequest else "Host")
+        del self.session.delete_failures[123]
+        await self.send("https://example.com")
+        self.assertIn("IP", self.session.messages[-1].text)
+        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 1)
+
+    async def test_admins_keep_independent_panels_and_drafts(self):
+        for admin in (123, 456):
+            await self.send("/start", admin=admin)
+            await self.click("add", admin=admin)
+        await self.send("First", admin=123)
+        await self.send("Second", admin=456)
+        for admin in (123, 456):
+            sends = [request for request in self.session.requests if isinstance(request, SendMessage) and request.chat_id == admin]
+            edits = [request for request in self.session.requests if isinstance(request, EditMessageText) and request.chat_id == admin]
+            self.assertEqual(len(sends), 1)
+            self.assertEqual(len({request.message_id for request in edits}), 1)
+        await self.send("Host", admin=123)
+        self.assertIn("Сайт", self.session.messages[-1].text)
+        await self.send("Other", admin=456)
+        self.assertIn("Сайт", self.session.messages[-1].text)
+
+    async def test_panel_not_modified_is_success_and_missing_panel_is_replaced_once(self):
+        await self.send("/start")
+        self.session.edit_failures[123] = lambda method: TelegramBadRequest(method, "Bad Request: message is not modified")
+        await self.send("/start")
+        self.assertIsInstance(self.session.requests[-1], DeleteMessage)
+        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 1)
+        for count, reason in enumerate(("message to edit not found", "message can't be edited"), start=2):
+            self.session.edit_failures[123] = lambda method, reason=reason: TelegramBadRequest(method, reason)
+            await self.click("stats:0")
+            self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), count)
+        del self.session.edit_failures[123]
+        await self.click("menu")
+        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 3)
+
+    async def test_bad_html_does_not_fallback_to_new_panel_and_failed_first_send_does_not_duplicate(self):
+        self.session.failures[123] = lambda method: TelegramNetworkError(method, "offline")
+        with self.assertLogs("bot", level="ERROR"):
+            await self.send("/start")
+        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 1)
+        self.assertFalse(any(isinstance(request, DeleteMessage) for request in self.session.requests))
+        del self.session.failures[123]
+        await self.send("/start")
+        self.session.edit_failures[123] = lambda method: TelegramBadRequest(method, "can't parse entities")
+        before = len(self.session.requests)
+        with self.assertLogs("bot", level="ERROR"):
+            await self.send("/start")
+        self.assertFalse(any(isinstance(request, (SendMessage, DeleteMessage)) for request in self.session.requests[before:]))
+
+    async def test_network_render_failure_keeps_user_input_without_duplicate_send(self):
+        await self.send("/start")
+        self.session.edit_failures[123] = lambda method: TelegramNetworkError(method, "offline")
+        before = len(self.session.requests)
+        with self.assertLogs("bot", level="ERROR"):
+            await self.send("/start")
+        self.assertFalse(any(isinstance(request, (SendMessage, DeleteMessage)) for request in self.session.requests[before:]))
+        del self.session.edit_failures[123]
+        await self.send("/start")
+        self.assertIsInstance(self.session.requests[-1], DeleteMessage)
+
+    async def test_restart_adopts_ui_panel_but_reminder_callback_preserves_reminder(self):
+        await self.send("/start")
+        panel = max(self.session.sent_messages.values(), key=lambda item: item.message_id)
+        await self.dispatcher.fsm.close()
+        self.dispatcher = create_dispatcher(self.store, self.settings)
+        await self.click("stats:0", message=panel)
+        self.assertIsInstance(self.session.requests[-1], EditMessageText)
+        self.assertEqual(self.session.requests[-1].message_id, panel.message_id)
+        server = self.store.add(FIELDS)
+        from reminders import reminder_keyboard, server_text
+        reminder = await self.bot.send_message(123, server_text(server), reply_markup=reminder_keyboard(server, date(2026, 10, 12)))
+        await self.dispatcher.fsm.close()
+        self.dispatcher = create_dispatcher(self.store, self.settings)
+        before = len(self.session.requests)
+        await self.click(f"renew:{server['id']}:1", message=reminder)
+        self.assertIsInstance(self.session.requests[-1], SendMessage)
+        self.assertFalse(any(isinstance(request, (EditMessageText, EditMessageReplyMarkup, DeleteMessage))
+                             and request.message_id == reminder.message_id for request in self.session.requests[before:]))
+
+    async def test_report_keeps_file_and_creates_new_panel_after_retiring_previous_keyboard(self):
+        self.store.add(FIELDS)
+        await self.send("/start")
+        await self.click("stats:0")
+        old_panel = max(self.session.sent_messages.values(), key=lambda item: item.message_id)
+        await self.click("report:all")
+        self.assertEqual(len(self.session.documents), 1)
+        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 2)
+        retirement = next(request for request in self.session.requests if isinstance(request, EditMessageReplyMarkup))
+        self.assertEqual(retirement.message_id, old_panel.message_id)
+        self.assertIsNone(retirement.reply_markup)
+        document_id = next(message.message_id for message in self.session.sent_messages.values() if message.document)
+        current_panel = max(self.session.sent_messages.values(), key=lambda item: item.message_id)
+        self.assertNotEqual(current_panel.message_id, old_panel.message_id)
+        await self.click("menu", message=old_panel)
+        self.assertEqual(self.session.requests[-1].message_id, current_panel.message_id)
+        self.assertFalse(any(isinstance(request, DeleteMessage) and request.message_id == old_panel.message_id for request in self.session.requests))
+        self.assertFalse(any(isinstance(request, (EditMessageText, EditMessageReplyMarkup, DeleteMessage))
+                             and request.message_id == document_id for request in self.session.requests))
+
+    async def test_failed_document_send_keeps_same_panel_without_rotation(self):
+        await self.send("/start")
+        await self.click("stats:0")
+        panel_id = max(self.session.sent_messages)[1]
+        await self.dispatcher.fsm.close()
+        self.dispatcher = create_dispatcher(self.store, self.settings)
+        self.session.document_failures[123] = lambda method: TelegramNetworkError(method, "offline")
+        before = len(self.session.requests)
+        with self.assertLogs("bot", level="ERROR"):
+            await self.click("report:all")
+        self.assertFalse(any(isinstance(request, (SendMessage, EditMessageReplyMarkup)) for request in self.session.requests[before:]))
+        self.assertEqual(self.button("📥 Скачать по всем серверам"), "report:all")
+        self.assertEqual(self.button("🟢 Активные серверы"), "stats:active:0")
+        self.assertEqual(self.session.requests[-1].message_id, panel_id)
+        del self.session.document_failures[123]
+        await self.click(self.button("📥 Скачать по всем серверам"))
+        self.assertEqual(len([message for message in self.session.sent_messages.values() if message.document]), 1)
+        self.assertNotEqual(max(self.session.sent_messages)[1], panel_id)
+        self.assertEqual(self.button("📥 Скачать по всем серверам"), "report:all")
+
+    async def test_report_creates_fresh_panel_even_if_old_keyboard_retirement_fails(self):
+        await self.send("/start")
+        panel_id = max(self.session.sent_messages)[1]
+        self.session.edit_failures[123] = lambda method: TelegramNetworkError(method, "offline")
+        with self.assertLogs("bot", level="WARNING"):
+            await self.click("report:all")
+        self.assertEqual(len(self.session.documents), 1)
+        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 2)
+        del self.session.edit_failures[123]
+        await self.click("menu")
+        self.assertNotEqual(self.session.requests[-1].message_id, panel_id)
 
     async def test_unauthorized_messages_and_callbacks_are_silently_ignored(self):
         await self.send("/start", admin=999)
@@ -258,8 +423,13 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send("19.12.2026")
         await self.send("200")
         new_save = self.button("Сохранить")
+        new_cancel = self.button("Отмена")
         await self.click(old_cancel)
+        self.assertEqual(self.button("Сохранить"), new_save)
+        self.assertEqual(self.button("Отмена"), new_cancel)
         await self.click(old_save)
+        self.assertEqual(self.button("Сохранить"), new_save)
+        self.assertEqual(self.button("Отмена"), new_cancel)
         self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-10-19")
         await self.click(new_save)
         self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-12-19")
@@ -336,7 +506,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(f"report:{active['id']}", actions)
         await self.click("report:all")
         book = load_workbook(BytesIO(self.session.documents[-1].document.data))
-        self.assertEqual(book.sheetnames[:2], ["Сводка", "Удалённые"])
+        self.assertEqual(book.sheetnames[:3], ["Сводка", "Активные", "Удалённые"])
         await self.click(f"report:{archived['id']}")
         self.assertEqual(len(load_workbook(BytesIO(self.session.documents[-1].document.data)).worksheets), 1)
         count = len(self.session.requests)

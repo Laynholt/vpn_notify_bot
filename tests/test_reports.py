@@ -4,6 +4,8 @@ import unittest
 from datetime import date
 from io import BytesIO
 from pathlib import Path
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 from storage import Storage
 from test_core import FIELDS
@@ -47,9 +49,9 @@ class ReportTests(unittest.TestCase):
         self.store.delete(archived["id"], 1)
         self.store.add({**FIELDS, "name": "x/[]:*?\\" + "a" * 80, "amount_kopeks": 1050})
         book = read_report(self.store.statistics())
-        self.assertEqual(book.sheetnames[:2], ["Сводка", "Удалённые"])
-        self.assertEqual(len(book.sheetnames), 5)
-        self.assertEqual(len({name.casefold() for name in book.sheetnames}), 5)
+        self.assertEqual(book.sheetnames[:3], ["Сводка", "Активные", "Удалённые"])
+        self.assertEqual(len(book.sheetnames), 6)
+        self.assertEqual(len({name.casefold() for name in book.sheetnames}), 6)
         for name in book.sheetnames:
             self.assertLessEqual(len(name), 31)
             self.assertFalse(any(char in name for char in '/[]:*?\\'))
@@ -57,12 +59,65 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(sum(row[0] == active["id"] for row in summary), 1)
         self.assertEqual(sum(row[0] == archived["id"] for row in summary), 1)
         self.assertEqual(len([row for row in book["Удалённые"].values if row[0] == archived["id"]]), 1)
+        active_rows = list(book["Активные"].values)
+        self.assertEqual([row[0] for row in active_rows if isinstance(row[0], int)], [active["id"], 3])
+        self.assertEqual(next(row[7] for row in active_rows if row[0] == "Всего учтено, ₽"), 10.5)
+        self.assertEqual(next(row[7] for row in book["Удалённые"].values if row[0] == "Всего учтено, ₽"), 0)
         self.assertTrue(any("не указано" in row for sheet in book.worksheets for row in sheet.values))
-        self.assertTrue(any(0 in row for sheet in book.worksheets[2:] for row in sheet.values))
+        self.assertTrue(any(0 in row for sheet in book.worksheets[3:] for row in sheet.values))
         for sheet in book.worksheets:
             for row in sheet:
                 for cell in row:
                     self.assertNotEqual(cell.data_type, "f")
+
+    def test_flagged_archive_names_fit_excel_utf16_limit_and_remain_unique(self):
+        first = self.store.add({**FIELDS, "name": "🇷🇺 Россия · RuVDS · RU2313782", "amount_kopeks": 86600})
+        self.store.delete(first["id"], 1)
+        self.store.add({**FIELDS, "name": "Россия · RuVDS · RU2313782", "amount_kopeks": 86600})
+        snapshot = self.store.statistics()
+        # ID11 reproduces the real workbook's 31-codepoint, 33-UTF16-unit title.
+        snapshot[0]["id"] = 11
+        snapshot[1]["id"] = 12
+        single = read_report(snapshot[:1], single=True)
+        self.assertLessEqual(len(single.sheetnames[0].encode("utf-16-le")) // 2, 31)
+        book = read_report(snapshot)
+        titles = book.sheetnames[3:]
+        self.assertEqual(titles, ["11 Россия · RuVDS · RU2313782", "12 Россия · RuVDS · RU2313782"])
+        for title in titles:
+            self.assertLessEqual(len(title.encode("utf-16-le")) // 2, 31)
+        self.assertEqual(len(set(titles)), 2)
+        self.assertEqual(read_report(snapshot[:1], single=True).sheetnames, titles[:1])
+
+    def test_emoji_only_and_supplementary_names_have_safe_id_titles(self):
+        self.store.add({**FIELDS, "name": "🚀"})
+        self.store.add({**FIELDS, "name": "\U00020000" * 40})
+        book = read_report(self.store.statistics())
+        self.assertEqual(book.sheetnames[3:], ["1", "2"])
+
+    def test_all_xml_text_is_emoji_free_preserves_unicode_and_formula_safety(self):
+        from reports import build_report
+        self.store.add({**FIELDS, "amount_kopeks": 10000})
+        snapshot = self.store.statistics()
+        snapshot[0].update(name="⚙️=1+1", hoster="🇷🇺 Хостер café ₽ ∑ ≤ ≈ → 👩‍💻 1️⃣ ☎️ ™️ 𝄞 ‼ ⁉ ℹ ↩",
+                           website="https://example.com/🚀", ip_address="192.0.2.1🏳️‍🌈", domain="vpn.example.com✨")
+        payload = build_report(snapshot)
+        with ZipFile(BytesIO(payload)) as archive:
+            for path in archive.namelist():
+                if path.endswith(".xml"):
+                    for node in ElementTree.fromstring(archive.read(path)).iter():
+                        for value in [node.text or "", *node.attrib.values()]:
+                            self.assertFalse(any(char in value for char in "⚙️🇷🇺👩‍💻1️⃣☎️™️🚀🏳️‍🌈✨𝄞‼⁉ℹ↩" if char not in "1"))
+                            self.assertFalse(any(ord(char) > 0xFFFF for char in value))
+        from openpyxl import load_workbook
+        book = load_workbook(BytesIO(payload))
+        server_sheet = book.worksheets[-1]
+        self.assertEqual(server_sheet["A1"].value, "=1+1")
+        self.assertEqual(server_sheet["A1"].data_type, "s")
+        self.assertEqual(server_sheet["B3"].value, "Хостер café ₽ ∑ ≤ ≈ →")
+        self.assertEqual(server_sheet["B4"].value, "https://example.com/")
+        self.assertEqual(server_sheet["B5"].value, "192.0.2.1")
+        self.assertEqual(server_sheet["B6"].value, "vpn.example.com")
+        self.assertEqual(snapshot[0]["name"], "⚙️=1+1")
 
     def test_empty_report_and_generation_do_not_change_data(self):
         self.assertGreaterEqual(len(read_report([]).worksheets), 1)

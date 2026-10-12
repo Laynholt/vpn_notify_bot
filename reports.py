@@ -8,10 +8,23 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 MONEY_FORMAT = '#,##0.00 "₽"'
 HEADER_FILL = PatternFill("solid", fgColor="243C5A")
+EMOJI = re.compile(
+    r"[#*0-9]\ufe0f?\u20e3|[©®™]\ufe0f|"
+    r"[\U00010000-\U0010ffff\u200d\u20e3\ufe0e\ufe0f"
+    r"\u203c\u2049\u2139\u2194-\u2199\u21a9\u21aa"
+    r"\u231a\u231b\u2328\u23cf\u23e9-\u23f3\u23f8-\u23fa\u24c2"
+    r"\u25aa\u25ab\u25b6\u25c0\u25fb-\u25fe\u2600-\u26ff\u2700-\u27bf"
+    r"\u2934\u2935\u2b05-\u2b07\u2b1b\u2b1c\u2b50\u2b55\u3030\u303d\u3297\u3299]"
+)
+
+
+def plain_text(value):
+    # BMP-only export keeps Excel's UTF-16 title limit equal to Python's length.
+    return EMOJI.sub("", value).strip()
 
 
 def append_row(sheet, values, *, money_columns=()):
-    sheet.append(values)
+    sheet.append([plain_text(value) if isinstance(value, str) else value for value in values])
     for cell in sheet[sheet.max_row]:
         if isinstance(cell.value, str):
             cell.data_type = "s"
@@ -56,9 +69,10 @@ def build_report(servers, *, single=False):
     book.remove(book.active)
     if not single:
         summary_sheet(book, "Сводка", servers)
+        summary_sheet(book, "Активные", [server for server in servers if not server["deleted_at"]])
         summary_sheet(book, "Удалённые", [server for server in servers if server["deleted_at"]])
     for server in servers:
-        title = re.sub(r"[\\/*?:\[\]]", "_", f"{server['id']} {server['name']}")[:31].strip("'")
+        title = re.sub(r"[\\/*?:\[\]]", "_", f"{server['id']} {plain_text(server['name'])}")[:31].strip("'").strip()
         sheet = book.create_sheet(title)
         append_row(sheet, [server["name"]])
         sheet["A1"].font = Font(bold=True, size=16, color="243C5A")

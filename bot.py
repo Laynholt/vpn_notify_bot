@@ -7,7 +7,9 @@ from html import escape
 from secrets import token_hex
 
 from aiogram import BaseMiddleware, Dispatcher, Router
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramNetworkError
 from aiogram.fsm.storage.memory import SimpleEventIsolation
+from aiogram.methods import EditMessageText, SendMessage
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 from reminders import display_date, server_text
@@ -59,13 +61,32 @@ class BotUI:
     def __init__(self, storage, settings):
         self.storage, self.settings = storage, settings
         self.drafts = {}
+        self.panels = {}
+        self.panel_markups = {}
 
     def today(self):
         return datetime.now(self.settings.timezone).date()
 
     async def say(self, message, text, markup=None):
-        await message.answer(text, reply_markup=markup, parse_mode="HTML",
-                             link_preview_options=LinkPreviewOptions(is_disabled=True))
+        if markup is None:
+            markup = self.panel_markups.get(message.chat.id)
+        panel_id = self.panels.get(message.chat.id)
+        if panel_id is not None:
+            try:
+                await message.bot.edit_message_text(text, chat_id=message.chat.id, message_id=panel_id,
+                    reply_markup=markup, parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True))
+                self.panel_markups[message.chat.id] = markup
+                return
+            except TelegramBadRequest as error:
+                reason = error.message.lower()
+                if "message is not modified" in reason:
+                    return
+                if "message to edit not found" not in reason and "message can't be edited" not in reason:
+                    raise
+        panel = await message.answer(text, reply_markup=markup, parse_mode="HTML",
+                                     link_preview_options=LinkPreviewOptions(is_disabled=True))
+        self.panels[message.chat.id] = panel.message_id
+        self.panel_markups[message.chat.id] = markup
 
     async def menu(self, message, admin_id):
         self.drafts.pop(admin_id, None)
@@ -170,6 +191,14 @@ class BotUI:
         data = await asyncio.to_thread(build_report, servers, single=server_id is not None)
         name = f"server-{server_id}-statistics.xlsx" if server_id is not None else "servers-statistics.xlsx"
         await message.answer_document(BufferedInputFile(data, filename=name), caption="История оплаченных периодов и сумм в рублях.")
+        panel_id = self.panels.pop(message.chat.id, None)
+        self.panel_markups.pop(message.chat.id, None)
+        if panel_id is not None:
+            try:
+                await message.bot.edit_message_reply_markup(chat_id=message.chat.id, message_id=panel_id, reply_markup=None)
+            except TelegramAPIError as error:
+                logger.warning("Не снята клавиатура статистики: %s", type(error).__name__)
+        await self.list_statistics(message)
 
     def form_keyboard(self, draft, confirm=False):
         rows = []
@@ -201,6 +230,13 @@ class BotUI:
                        keyboard([[("Открыть сервер", f"view:{server_id}")], [("🏠 Главное меню", "menu")]]))
 
     async def on_message(self, message):
+        await self._handle_message(message)
+        try:
+            await message.delete()
+        except TelegramAPIError as error:
+            logger.warning("Не удалён ввод администратора: %s", type(error).__name__)
+
+    async def _handle_message(self, message):
         admin_id = message.from_user.id
         text = (message.text or "").strip()
         if text.split("@", 1)[0] in ("/start", "/cancel"):
@@ -289,12 +325,17 @@ class BotUI:
         if draft.kind == "delete":
             await self.say(message, "Сервер удалён.", MENU)
         else:
-            await self.say(message, "Сохранено.")
             await self.card(message, server_id)
 
     async def on_callback(self, callback):
         await callback.answer()
         message, admin_id = callback.message, callback.from_user.id
+        if (message.chat.id not in self.panels and message.text and message.reply_markup
+                and any(button.callback_data in ("menu", "add")
+                        or (button.callback_data or "").startswith(("cancel:", "save:", "stats:", "list:", "servers:", "view:"))
+                        for row in message.reply_markup.inline_keyboard for button in row)):
+            self.panels[message.chat.id] = message.message_id
+            self.panel_markups[message.chat.id] = message.reply_markup
         parts = (callback.data or "").split(":")
         action = parts[0]
         if action == "menu" and len(parts) == 1:
@@ -363,9 +404,15 @@ def create_dispatcher(storage, settings):
     @router.errors()
     async def on_error(event):
         logger.error("Ошибка обработки: %s", type(event.exception).__name__)
+        if (isinstance(event.exception, TelegramNetworkError)
+                and isinstance(event.exception.method, (SendMessage, EditMessageText))):
+            return True
         message = event.update.message or (event.update.callback_query.message if event.update.callback_query else None)
         if isinstance(message, Message) and message.chat.type == "private" and message.chat.id in settings.admin_ids:
-            await ui.say(message, "Не удалось выполнить действие. Попробуйте ещё раз или нажмите /cancel.")
+            try:
+                await ui.say(message, "Не удалось выполнить действие. Попробуйте ещё раз или нажмите /cancel.")
+            except TelegramAPIError as error:
+                logger.warning("Не показана ошибка: %s", type(error).__name__)
         return True
 
     dispatcher = Dispatcher(events_isolation=SimpleEventIsolation())
