@@ -196,7 +196,10 @@ class BotUI:
             if all(key in updated for key in FIELDS):
                 updated.update(validate_server(updated, allow_empty_addresses=draft.kind != "add"))
                 if draft.kind == "edit":
-                    validate_payment_dates(updated, self.storage.payment_history(draft.server_id))
+                    history = self.storage.payment_history(draft.server_id)
+                    validate_payment_dates(updated, history)
+                    if len(history) == 1:
+                        updated["payment_starts_on"] = updated["starts_on"]
             if selected == "amount_kopeks":
                 if draft.kind == "add":
                     updated.update(total_paid_kopeks=value, known_payments=1, unknown_payments=0)

@@ -349,6 +349,22 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.statistics(), before)
         self.assertIn("Не удалось", self.session.messages[-1].text)
 
+    async def test_start_date_preview_matches_saved_single_payment(self):
+        server = self.store.add({**FIELDS, "amount_kopeks": 10000})
+        await self.click(f"edit:{server['id']}:1:starts_on")
+        await self.send("05.10.2026")
+        self.assertIn("05.10.2026 — 19.10.2026", self.session.messages[-1].text)
+        await self.click(self.button("Сохранить"))
+        self.assertIn("05.10.2026 — 19.10.2026", self.session.messages[-1].text)
+        self.assertEqual(self.store.payment_history(server["id"])[0]["starts_on"], "2026-10-05")
+        self.store.renew(server["id"], 2, "2026-11-19", 20000)
+        await self.click(f"edit:{server['id']}:3:starts_on")
+        await self.send("06.10.2026")
+        self.assertIn("20.10.2026 — 19.11.2026", self.session.messages[-1].text)
+        await self.click(self.button("Сохранить"))
+        self.assertEqual(self.store.payment_history(server["id"])[0]["starts_on"], "2026-10-06")
+        self.assertEqual(self.store.get(server["id"])["payment_starts_on"], "2026-10-20")
+
 
 if __name__ == "__main__":
     unittest.main()
