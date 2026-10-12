@@ -82,8 +82,9 @@ class BotUI:
         page = min(max(page, 0), (len(servers) - 1) // 10)
         page_servers = servers[page * 10:(page + 1) * 10]
         action = "servers" if overview else "list"
-        rows = [[(item["name"][:60], f"view:{item['id']}")]
-                for item in sorted(page_servers, key=lambda server: re.sub(r"^(?:[0-9]\ufe0f?\u20e3|\W)+", "", server["name"]).casefold())]
+        buttons = [(item["name"][:30], f"view:{item['id']}")
+                   for item in sorted(page_servers, key=lambda server: re.sub(r"^(?:[0-9]\ufe0f?\u20e3|\W)+", "", server["name"]).casefold())]
+        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
         navigation = []
         if page:
             navigation.append(("← Назад", f"{action}:{page - 1}"))
@@ -122,8 +123,8 @@ class BotUI:
         unknown = sum(server["unknown_payments"] for server in servers)
         periods = sum(len(server["payments"]) for server in servers)
         bonus = sum(payment["paid_with_bonus"] for server in servers for payment in server["payments"])
-        rows = [[("Скачать по всем серверам", "report:all")],
-                [("Активные серверы", "stats:active:0"), ("Архивные серверы", "stats:archive:0")],
+        rows = [[("📥 Скачать по всем серверам", "report:all")],
+                [("🟢 Активные серверы", "stats:active:0"), ("🗃 Архивные серверы", "stats:archive:0")],
                 [("🏠 Главное меню", "menu")]]
         text = ("📊 <b>Статистика серверов</b>\n\n"
                 f"<b>Расходы за всё время</b>\nУчтено: <b>{format_money(total)}</b>\n"
@@ -141,8 +142,9 @@ class BotUI:
         servers = [server for server in self.storage.statistics()
                    if bool(server["deleted_at"]) == (group == "archive")]
         page = min(max(page, 0), max(0, (len(servers) - 1) // 10))
-        rows = [[(server["name"][:50], f"report:{server['id']}")]
-                for server in servers[page * 10:(page + 1) * 10]]
+        buttons = [(server["name"][:30], f"report:{server['id']}")
+                   for server in servers[page * 10:(page + 1) * 10]]
+        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
         navigation = []
         if page:
             navigation.append(("← Назад", f"stats:{group}:{page - 1}"))

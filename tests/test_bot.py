@@ -62,6 +62,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click("add", admin=999)
         await self.send("/start", chat_type="group")
         await self.click("add", chat_type="group")
+        await self.click("stats:active:0", admin=999)
+        await self.click("stats:archive:0", chat_type="group")
         self.assertEqual(self.session.requests, [])
         self.assertEqual(self.store.list(), [])
 
@@ -163,6 +165,21 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("servers:1", actions)
         await self.click("servers:1")
         self.assertIn("19.10.2026", self.session.messages[-1].text)
+
+    async def test_server_lists_pair_buttons_and_keep_odd_last_row_on_next_page(self):
+        ids = [self.store.add({**FIELDS, "name": f"Server {index:02} " + "x" * 50})["id"] for index in range(13)]
+        for action in ("list", "servers"):
+            for page, sizes, expected_ids in ((0, [2] * 5, ids[:10]), (1, [2, 1], ids[10:])):
+                await self.click(f"{action}:{page}")
+                rows = self.session.messages[-1].reply_markup.inline_keyboard
+                server_rows = [row for row in rows if row[0].callback_data.startswith("view:")]
+                self.assertEqual([len(row) for row in server_rows], sizes)
+                self.assertEqual([button.callback_data for row in server_rows for button in row],
+                                 [f"view:{server_id}" for server_id in expected_ids])
+                self.assertTrue(all(len(button.text) <= 30 for row in server_rows for button in row))
+                self.assertTrue(all(button.callback_data.startswith("view:") for row in server_rows for button in row))
+                self.assertIn(f"{action}:{1 - page}", [button.callback_data for row in rows for button in row])
+                self.assertEqual(rows[-1][0].callback_data, "menu")
 
     async def test_my_servers_sorts_expiry_globally_before_pagination(self):
         later = self.store.add({**FIELDS, "name": "Later", "ends_on": "2026-12-01"})
@@ -308,12 +325,12 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         archived = self.store.add({**FIELDS, "name": "Archived", "amount_kopeks": 20000})
         self.store.delete(archived["id"], 1)
         await self.click("stats:0")
-        await self.click(self.button("Активные серверы"))
+        await self.click(self.button("🟢 Активные серверы"))
         actions = [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row]
         self.assertIn(f"report:{active['id']}", actions)
         self.assertNotIn(f"report:{archived['id']}", actions)
         await self.click(self.button("← К статистике"))
-        await self.click(self.button("Архивные серверы"))
+        await self.click(self.button("🗃 Архивные серверы"))
         actions = [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row]
         self.assertIn(f"report:{archived['id']}", actions)
         self.assertNotIn(f"report:{active['id']}", actions)
@@ -390,12 +407,12 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("<b>Расходы за всё время</b>", text)
 
     async def test_statistics_groups_filter_before_pagination_and_return_to_overview(self):
-        groups = {"Активные серверы": [], "Архивные серверы": []}
+        groups = {"🟢 Активные серверы": [], "🗃 Архивные серверы": []}
         for index in range(11):
             for label, ids in groups.items():
                 server = self.store.add({**FIELDS, "name": f"{label} {index}", "amount_kopeks": 100})
                 ids.append(server["id"])
-                if label == "Архивные серверы":
+                if label == "🗃 Архивные серверы":
                     self.store.delete(server["id"], 1)
         await self.click("stats:0")
         for label, ids in groups.items():
@@ -404,10 +421,16 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([action for action in actions if action.startswith("report:")], ["report:all"])
             self.assertIn("22,00 ₽", overview.text)
             await self.click(self.button(label))
+            server_rows = [row for row in self.session.messages[-1].reply_markup.inline_keyboard
+                           if row[0].callback_data.startswith("report:")]
+            self.assertEqual([len(row) for row in server_rows], [2] * 5)
             actions = [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row]
             self.assertEqual([action for action in actions if action.startswith("report:")],
                              [f"report:{server_id}" for server_id in ids[:10]])
             await self.click(self.button("Далее →"))
+            server_rows = [row for row in self.session.messages[-1].reply_markup.inline_keyboard
+                           if row[0].callback_data.startswith("report:")]
+            self.assertEqual([len(row) for row in server_rows], [1])
             actions = [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row]
             self.assertEqual([action for action in actions if action.startswith("report:")], [f"report:{ids[10]}"])
             await self.click(self.button("← Назад"))
@@ -418,7 +441,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_statistics_groups_keep_navigation(self):
         await self.click("stats:0")
-        for label in ("Активные серверы", "Архивные серверы"):
+        for label in ("🟢 Активные серверы", "🗃 Архивные серверы"):
             await self.click(self.button(label))
             message = self.session.messages[-1]
             self.assertIn("нет", message.text.lower())

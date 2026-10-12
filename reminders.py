@@ -30,7 +30,7 @@ def server_text(server, *, today=None):
     if unknown and known:
         total += f" (итог неполный; без суммы: {unknown})"
     starts_on = server.get("payment_starts_on", server["starts_on"])
-    rental = f"\nАренда с {display_date(server['starts_on'])}" if starts_on != server["starts_on"] else ""
+    rental = f"\n🗓️ Аренда с {display_date(server['starts_on'])}" if starts_on != server["starts_on"] else ""
     ip = f"<code>{escape(server['ip_address'])}</code>" if server["ip_address"] else "не указан"
     domain = f"<code>{escape(server['domain'])}</code>" if server["domain"] else "не указан"
     return (f"<b>{escape(server['name'])}</b>\n"
