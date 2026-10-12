@@ -9,3 +9,16 @@ data/
 *.sqlite3-*
 *.log
 .superpowers/
+docs/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*.xlsx
+backups/
