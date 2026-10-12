@@ -308,9 +308,15 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         archived = self.store.add({**FIELDS, "name": "Archived", "amount_kopeks": 20000})
         self.store.delete(archived["id"], 1)
         await self.click("stats:0")
+        await self.click(self.button("Активные серверы"))
         actions = [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row]
         self.assertIn(f"report:{active['id']}", actions)
+        self.assertNotIn(f"report:{archived['id']}", actions)
+        await self.click(self.button("← К статистике"))
+        await self.click(self.button("Архивные серверы"))
+        actions = [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row]
         self.assertIn(f"report:{archived['id']}", actions)
+        self.assertNotIn(f"report:{active['id']}", actions)
         await self.click("report:all")
         book = load_workbook(BytesIO(self.session.documents[-1].document.data))
         self.assertEqual(book.sheetnames[:2], ["Сводка", "Удалённые"])
@@ -382,6 +388,44 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Периодов без суммы: <b>1</b>", text)
             self.assertIn("итог неполный", text.lower())
             self.assertIn("<b>Расходы за всё время</b>", text)
+
+    async def test_statistics_groups_filter_before_pagination_and_return_to_overview(self):
+        groups = {"Активные серверы": [], "Архивные серверы": []}
+        for index in range(11):
+            for label, ids in groups.items():
+                server = self.store.add({**FIELDS, "name": f"{label} {index}", "amount_kopeks": 100})
+                ids.append(server["id"])
+                if label == "Архивные серверы":
+                    self.store.delete(server["id"], 1)
+        await self.click("stats:0")
+        for label, ids in groups.items():
+            overview = self.session.messages[-1]
+            actions = [b.callback_data for row in overview.reply_markup.inline_keyboard for b in row]
+            self.assertEqual([action for action in actions if action.startswith("report:")], ["report:all"])
+            self.assertIn("22,00 ₽", overview.text)
+            await self.click(self.button(label))
+            actions = [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row]
+            self.assertEqual([action for action in actions if action.startswith("report:")],
+                             [f"report:{server_id}" for server_id in ids[:10]])
+            await self.click(self.button("Далее →"))
+            actions = [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row]
+            self.assertEqual([action for action in actions if action.startswith("report:")], [f"report:{ids[10]}"])
+            await self.click(self.button("← Назад"))
+            self.assertIn(f"report:{ids[0]}", [b.callback_data for row in self.session.messages[-1].reply_markup.inline_keyboard for b in row])
+            await self.click(self.button("← К статистике"))
+        await self.click(self.button("🏠 Главное меню"))
+        self.assertIn("Главное меню", self.session.messages[-1].text)
+
+    async def test_empty_statistics_groups_keep_navigation(self):
+        await self.click("stats:0")
+        for label in ("Активные серверы", "Архивные серверы"):
+            await self.click(self.button(label))
+            message = self.session.messages[-1]
+            self.assertIn("нет", message.text.lower())
+            actions = [b.callback_data for row in message.reply_markup.inline_keyboard for b in row]
+            self.assertFalse(any(action.startswith("report:") for action in actions))
+            self.assertIn("menu", actions)
+            await self.click(self.button("← К статистике"))
 
     async def test_bonus_card_and_price_correction_preview(self):
         server = self.store.add({**FIELDS, "amount_kopeks": 0})

@@ -114,7 +114,7 @@ class BotUI:
                 [("🖥 Мои сервера", "servers:0"), ("🏠 Главное меню", "menu")]]
         await self.say(message, server_text(server, today=self.today()), keyboard(rows))
 
-    async def list_statistics(self, message, page):
+    async def list_statistics(self, message):
         servers = self.storage.statistics()
         active = [server for server in servers if not server["deleted_at"]]
         total = sum(server["total_paid_kopeks"] for server in servers)
@@ -122,19 +122,9 @@ class BotUI:
         unknown = sum(server["unknown_payments"] for server in servers)
         periods = sum(len(server["payments"]) for server in servers)
         bonus = sum(payment["paid_with_bonus"] for server in servers for payment in server["payments"])
-        page = min(max(page, 0), max(0, (len(servers) - 1) // 10))
-        rows = [[("Скачать по всем серверам", "report:all")]]
-        for server in servers[page * 10:(page + 1) * 10]:
-            label = ("🗃 Удалён · " if server["deleted_at"] else "") + server["name"][:50]
-            rows.append([(label, f"report:{server['id']}")])
-        navigation = []
-        if page:
-            navigation.append(("← Назад", f"stats:{page - 1}"))
-        if (page + 1) * 10 < len(servers):
-            navigation.append(("Далее →", f"stats:{page + 1}"))
-        if navigation:
-            rows.append(navigation)
-        rows.append([("🏠 Главное меню", "menu")])
+        rows = [[("Скачать по всем серверам", "report:all")],
+                [("Активные серверы", "stats:active:0"), ("Архивные серверы", "stats:archive:0")],
+                [("🏠 Главное меню", "menu")]]
         text = ("📊 <b>Статистика серверов</b>\n\n"
                 f"<b>Расходы за всё время</b>\nУчтено: <b>{format_money(total)}</b>\n"
                 f"Активные серверы: {format_money(active_total)}\n"
@@ -144,7 +134,26 @@ class BotUI:
                 f"Периодов без суммы: <b>{unknown}</b>")
         if unknown:
             text += "\n⚠️ Итог неполный: учтены только известные суммы."
-        text += f"\n\n<b>Выгрузка в Excel · страница {page + 1}</b>\nВыберите сервер или скачайте общую историю оплат."
+        text += "\n\n<b>Выгрузка в Excel</b>\nВыберите группу серверов или скачайте общую историю оплат."
+        await self.say(message, text, keyboard(rows))
+
+    async def list_statistics_servers(self, message, group, page):
+        servers = [server for server in self.storage.statistics()
+                   if bool(server["deleted_at"]) == (group == "archive")]
+        page = min(max(page, 0), max(0, (len(servers) - 1) // 10))
+        rows = [[(server["name"][:50], f"report:{server['id']}")]
+                for server in servers[page * 10:(page + 1) * 10]]
+        navigation = []
+        if page:
+            navigation.append(("← Назад", f"stats:{group}:{page - 1}"))
+        if (page + 1) * 10 < len(servers):
+            navigation.append(("Далее →", f"stats:{group}:{page + 1}"))
+        if navigation:
+            rows.append(navigation)
+        rows.extend([[("← К статистике", "stats:0")], [("🏠 Главное меню", "menu")]])
+        title = "Архивные серверы" if group == "archive" else "Активные серверы"
+        text = (f"<b>{title} · страница {page + 1}</b>\n\n"
+                + ("Выберите сервер, чтобы скачать историю оплат в Excel." if servers else "В этой группе пока нет серверов."))
         await self.say(message, text, keyboard(rows))
 
     async def send_statistics(self, message, server_id=None):
@@ -299,12 +308,15 @@ class BotUI:
         elif action == "report" and len(parts) == 2 and (parts[1] == "all" or parts[1].isdigit()):
             self.drafts.pop(admin_id, None)
             await self.send_statistics(message, None if parts[1] == "all" else int(parts[1]))
+        elif action == "stats" and len(parts) == 3 and parts[1] in ("active", "archive") and parts[2].isdigit():
+            self.drafts.pop(admin_id, None)
+            await self.list_statistics_servers(message, parts[1], int(parts[2]))
         elif action in ("list", "servers", "view", "stats") and len(parts) == 2 and parts[1].isdigit():
             self.drafts.pop(admin_id, None)
             if action in ("list", "servers"):
                 await self.list_servers(message, int(parts[1]), overview=action == "servers")
             elif action == "stats":
-                await self.list_statistics(message, int(parts[1]))
+                await self.list_statistics(message)
             else:
                 await self.card(message, int(parts[1]))
         elif (action in ("edit", "renew", "delete", "fields") and len(parts) == (4 if action == "edit" else 3)
