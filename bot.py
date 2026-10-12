@@ -55,6 +55,7 @@ class Draft:
     version: int | None = None
     selected_field: str | None = None
     ready: bool = False
+    needs_prompt: bool = False
 
 
 class BotUI:
@@ -188,7 +189,8 @@ class BotUI:
         if server_id is not None and not servers:
             await self.say(message, "Сервер не найден в статистике.", MENU)
             return
-        data = await asyncio.to_thread(build_report, servers, single=server_id is not None)
+        data = await asyncio.to_thread(build_report, servers, single=server_id is not None,
+                                       timezone=self.settings.timezone)
         name = f"server-{server_id}-statistics.xlsx" if server_id is not None else "servers-statistics.xlsx"
         await message.answer_document(BufferedInputFile(data, filename=name), caption="История оплаченных периодов и сумм в рублях.")
         panel_id = self.panels.pop(message.chat.id, None)
@@ -217,7 +219,9 @@ class BotUI:
             text = "Введите новую дату окончания оплаты (ДД.ММ.ГГГГ)."
         else:
             text = f"Введите: {LABELS[selected]}{hint}."
+        draft.needs_prompt = True
         await self.say(message, text, self.form_keyboard(draft))
+        draft.needs_prompt = False
 
     async def preview(self, message, draft):
         prefix = "Удалить этот сервер?" if draft.kind == "delete" else "Проверьте данные и нажмите «Сохранить»:"
@@ -248,6 +252,9 @@ class BotUI:
             return
         if draft.ready:
             await self.preview(message, draft)
+            return
+        if draft.needs_prompt:
+            await self.prompt(message, draft)
             return
         selected = draft.selected_field
         try:

@@ -4,7 +4,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 
-from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 
 from storage import format_money
@@ -63,7 +63,8 @@ class Notifier:
         today = local.date()
         for snapshot in self.storage.list():
             for admin_id in self.settings.admin_ids:
-                if now < self.retry_at.get(admin_id, now):
+                if (now < self.retry_at.get(admin_id, now)
+                        or now < self.retry_at.get((snapshot["id"], admin_id), now)):
                     continue
                 server = self.storage.get(snapshot["id"])
                 if server is None:
@@ -89,10 +90,12 @@ class Notifier:
                     delay = error.retry_after if isinstance(error, TelegramRetryAfter) else 60
                     if isinstance(error, TelegramForbiddenError):
                         delay = 3600
-                    self.retry_at[admin_id] = now + timedelta(seconds=delay + time.monotonic() - started)
+                    retry_key = (server["id"], admin_id) if isinstance(error, TelegramBadRequest) else admin_id
+                    self.retry_at[retry_key] = now + timedelta(seconds=delay + time.monotonic() - started)
                     logger.warning("Не доставлено: сервер %s, администратор %s, %s",
                                    server["id"], admin_id, type(error).__name__)
                 else:
+                    self.retry_at.pop((server["id"], admin_id), None)
                     self.storage.mark_delivered(server["id"], server["ends_on"], admin_id, day)
                 await asyncio.sleep(1.05)
 

@@ -151,6 +151,32 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.send("/start")
         self.assertIsInstance(self.session.requests[-1], DeleteMessage)
 
+    async def test_failed_form_prompt_repeats_question_without_consuming_next_input(self):
+        for applied in (False, True):
+            with self.subTest(applied=applied):
+                await self.send("/start")
+                await self.click("add")
+                original = self.session.make_request
+
+                async def fail_render(bot, method, timeout=None):
+                    if isinstance(method, EditMessageText):
+                        if applied:
+                            await original(bot, method, timeout)
+                        raise TelegramNetworkError(method, "offline")
+                    return await original(bot, method, timeout)
+
+                with patch.object(self.session, "make_request", side_effect=fail_render), self.assertLogs("bot", level="ERROR"):
+                    await self.send("VPN")
+                await self.send("Host" if applied else "VPN")
+                self.assertIn("Название хостера", self.session.messages[-1].text)
+                await self.send("Host")
+                for value in ("https://example.com", "192.0.2.10", "vpn.example.com",
+                              "01.10.2026", "19.10.2026", "100"):
+                    await self.send(value)
+                await self.click(self.button("Сохранить"))
+                saved = self.store.list()[-1]
+                self.assertEqual((saved["name"], saved["hoster"]), ("VPN", "Host"))
+
     async def test_restart_adopts_ui_panel_but_reminder_callback_preserves_reminder(self):
         await self.send("/start")
         panel = max(self.session.sent_messages.values(), key=lambda item: item.message_id)
@@ -513,6 +539,25 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         await self.click("report:all", admin=999)
         await self.click("report:all", chat_type="group")
         self.assertEqual(len(self.session.requests), count)
+
+    async def test_statistics_exports_deletion_date_in_configured_timezone(self):
+        from io import BytesIO
+        from openpyxl import load_workbook
+        server = self.store.add(FIELDS)
+        with patch("storage.datetime") as clock:
+            clock.now.return_value = datetime(2026, 10, 12, 21, 30, tzinfo=timezone.utc)
+            self.store.delete(server["id"], server["version"])
+        await self.click("report:all")
+        book = load_workbook(BytesIO(self.session.documents[-1].document.data))
+        for title in ("Сводка", "Удалённые"):
+            row = next(row for row in book[title].values if row[0] == server["id"])
+            self.assertEqual(row[9].date(), date(2026, 10, 13))
+        for action in ("report:all", f"report:{server['id']}"):
+            await self.click(action)
+            book = load_workbook(BytesIO(self.session.documents[-1].document.data))
+            deleted_on = next(row[1] for row in book.worksheets[-1].values if row[0] == "Удалён")
+            self.assertEqual(deleted_on.date(), date(2026, 10, 13))
+        self.assertEqual(self.store.statistics(server["id"])[0]["deleted_at"], "2026-10-12T21:30:00+00:00")
 
     async def test_card_has_compact_actions_and_escaped_copyable_addresses(self):
         server = self.store.add({**FIELDS, "name": "<VPN>", "amount_kopeks": 150050})

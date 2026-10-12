@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 from zoneinfo import ZoneInfo
 
-from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError, TelegramRetryAfter
 
 from config import Settings
 from helpers import telegram_bot
@@ -98,6 +98,47 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await self.tick(hour=10)
         self.assertTrue(self.store.delivered(server["id"], server["ends_on"], 123, "2026-10-12"))
         self.assertEqual(sum(msg.chat_id == 456 for msg in self.session.messages), 1)
+
+    async def test_bad_server_does_not_block_other_servers_and_retries_later(self):
+        bad = self.store.add({**FIELDS, "name": "Bad server"})
+        good = self.store.add({**FIELDS, "name": "Good server"})
+        original = self.session.make_request
+
+        async def reject_bad(bot, method, timeout=None):
+            if "Bad server" in getattr(method, "text", ""):
+                self.session.requests.append(method)
+                raise TelegramBadRequest(method, "invalid message content")
+            return await original(bot, method, timeout)
+
+        with patch.object(self.session, "make_request", side_effect=reject_bad):
+            with self.assertLogs("reminders", level="WARNING"):
+                await self.tick()
+            for admin in (123, 456):
+                self.assertTrue(self.store.delivered(good["id"], good["ends_on"], admin, "2026-10-12"))
+                self.assertFalse(self.store.delivered(bad["id"], bad["ends_on"], admin, "2026-10-12"))
+            await self.notifier.tick(datetime(2026, 10, 12, 9, 0, 30, tzinfo=timezone.utc))
+            self.assertEqual(sum("Bad server" in message.text for message in self.session.messages), 2)
+            with self.assertLogs("reminders", level="WARNING"):
+                await self.notifier.tick(datetime(2026, 10, 12, 9, 2, tzinfo=timezone.utc))
+        self.assertEqual(sum("Bad server" in message.text for message in self.session.messages), 4)
+        self.assertEqual(sum("Good server" in message.text for message in self.session.messages), 2)
+
+    async def test_recipient_errors_pause_all_servers_only_for_that_admin(self):
+        servers = [self.store.add({**FIELDS, "name": name}) for name in ("First", "Second")]
+        for error in (TelegramForbiddenError, TelegramRetryAfter, TelegramNetworkError):
+            with self.subTest(error=error):
+                self.store.connection.execute("DELETE FROM deliveries")
+                self.store.connection.commit()
+                self.notifier = Notifier(self.bot, self.store, self.settings)
+                self.session.requests.clear()
+                self.session.failures[123] = lambda method: (error(method, "blocked", 120)
+                    if error is TelegramRetryAfter else error(method, "offline"))
+                with self.assertLogs("reminders", level="WARNING"):
+                    await self.tick()
+                self.assertEqual(sum(message.chat_id == 123 for message in self.session.messages), 1)
+                for server in servers:
+                    self.assertTrue(self.store.delivered(server["id"], server["ends_on"], 456, "2026-10-12"))
+                    self.assertFalse(self.store.delivered(server["id"], server["ends_on"], 123, "2026-10-12"))
 
     async def test_retry_after_is_honored_without_blocking_second_admin(self):
         self.store.add(FIELDS)

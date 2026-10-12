@@ -1,5 +1,5 @@
 import re
-from datetime import date
+from datetime import date, datetime, timezone
 from io import BytesIO
 
 from openpyxl import Workbook
@@ -43,7 +43,7 @@ def header(sheet, values):
     sheet.freeze_panes = f"A{sheet.max_row + 1}"
 
 
-def summary_sheet(book, name, servers):
+def summary_sheet(book, name, servers, *, timezone):
     sheet = book.create_sheet(name)
     header(sheet, ["ID", "Сервер", "Хостер", "IP-адрес", "Домен", "Статус", "Оплачен до",
                    "Учтено оплат, ₽", "Периодов без суммы", "Удалён"])
@@ -53,7 +53,7 @@ def summary_sheet(book, name, servers):
                           date.fromisoformat(server["ends_on"]) if server["ends_on"] else "не указан",
                           server["total_paid_kopeks"] / 100 if server["known_payments"] else "не указано",
                           server["unknown_payments"],
-                          date.fromisoformat(server["deleted_at"][:10]) if server["deleted_at"] else None],
+                          datetime.fromisoformat(server["deleted_at"]).astimezone(timezone).date() if server["deleted_at"] else None],
                    money_columns=(8,))
     if not servers:
         append_row(sheet, ["Нет серверов"])
@@ -64,13 +64,13 @@ def summary_sheet(book, name, servers):
     sheet.auto_filter.ref = f"A1:J{max(1, len(servers) + 1)}"
 
 
-def build_report(servers, *, single=False):
+def build_report(servers, *, single=False, timezone=timezone.utc):
     book = Workbook()
     book.remove(book.active)
     if not single:
-        summary_sheet(book, "Сводка", servers)
-        summary_sheet(book, "Активные", [server for server in servers if not server["deleted_at"]])
-        summary_sheet(book, "Удалённые", [server for server in servers if server["deleted_at"]])
+        summary_sheet(book, "Сводка", servers, timezone=timezone)
+        summary_sheet(book, "Активные", [server for server in servers if not server["deleted_at"]], timezone=timezone)
+        summary_sheet(book, "Удалённые", [server for server in servers if server["deleted_at"]], timezone=timezone)
     for server in servers:
         title = re.sub(r"[\\/*?:\[\]]", "_", f"{server['id']} {plain_text(server['name'])}")[:31].strip("'").strip()
         sheet = book.create_sheet(title)
@@ -80,7 +80,7 @@ def build_report(servers, *, single=False):
                              ("Хостер", server["hoster"]), ("Сайт", server["website"]),
                              ("IP-адрес", server["ip_address"] or "не указан"),
                              ("Домен", server["domain"] or "не указан"),
-                             ("Удалён", date.fromisoformat(server["deleted_at"][:10]) if server["deleted_at"] else "—")):
+                             ("Удалён", datetime.fromisoformat(server["deleted_at"]).astimezone(timezone).date() if server["deleted_at"] else "—")):
             append_row(sheet, [label, value])
         append_row(sheet, [])
         header(sheet, ["Начало периода", "Конец периода", "Оплачено, ₽", "Оплата бонусами"])
