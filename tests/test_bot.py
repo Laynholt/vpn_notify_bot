@@ -406,6 +406,22 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("итог неполный", text.lower())
             self.assertIn("<b>Расходы за всё время</b>", text)
 
+    async def test_statistics_counts_undated_archive_payments_without_inventing_periods(self):
+        self.store.add({**FIELDS, "amount_kopeks": 10000})
+        archived = self.store.add({**FIELDS, "amount_kopeks": 30000})
+        self.store.delete(archived["id"], 1)
+        with self.store.connection:
+            self.store.connection.execute("UPDATE servers SET starts_on='', ends_on='' WHERE id=?", (archived["id"],))
+            self.store.connection.execute("UPDATE payments SET starts_on='', ends_on='' WHERE server_id=?", (archived["id"],))
+        before = self.store.statistics()
+        await self.click("stats:0")
+        text = self.session.messages[-1].text
+        self.assertIn("Периодов: <b>1</b>", text)
+        self.assertIn("Оплат без указанного периода: <b>1</b>", text)
+        self.assertIn("Суммарно: <b>400,00 ₽</b>", text)
+        self.assertNotIn("итог неполный", text.lower())
+        self.assertEqual(self.store.statistics(), before)
+
     async def test_statistics_groups_filter_before_pagination_and_return_to_overview(self):
         groups = {"🟢 Активные серверы": [], "🗃 Архивные серверы": []}
         for index in range(11):

@@ -36,7 +36,8 @@ def summary_sheet(book, name, servers):
                    "Учтено оплат, ₽", "Периодов без суммы", "Удалён"])
     for server in servers:
         append_row(sheet, [server["id"], server["name"], server["hoster"], server["ip_address"], server["domain"],
-                          "Удалён" if server["deleted_at"] else "Активен", date.fromisoformat(server["ends_on"]),
+                          "Удалён" if server["deleted_at"] else "Активен",
+                          date.fromisoformat(server["ends_on"]) if server["ends_on"] else "не указан",
                           server["total_paid_kopeks"] / 100 if server["known_payments"] else "не указано",
                           server["unknown_payments"],
                           date.fromisoformat(server["deleted_at"][:10]) if server["deleted_at"] else None],
@@ -70,7 +71,8 @@ def build_report(servers, *, single=False):
         append_row(sheet, [])
         header(sheet, ["Начало периода", "Конец периода", "Оплачено, ₽", "Оплата бонусами"])
         for payment in server["payments"]:
-            append_row(sheet, [date.fromisoformat(payment["starts_on"]), date.fromisoformat(payment["ends_on"]),
+            append_row(sheet, [date.fromisoformat(payment["starts_on"]) if payment["starts_on"] else "не указан",
+                              date.fromisoformat(payment["ends_on"]) if payment["ends_on"] else "не указан",
                               payment["amount_kopeks"] / 100 if payment["amount_kopeks"] is not None else "не указано",
                               "Оплачено бонусами" if payment["paid_with_bonus"] else ""],
                        money_columns=(3,))

@@ -82,6 +82,43 @@ class ReportTests(unittest.TestCase):
         payment = next(row for row in rows if len(row) > 3 and row[3] == "Оплачено бонусами")
         self.assertEqual(payment[2], 0)
 
+    def test_undated_archived_expenses_survive_reopen_and_both_reports(self):
+        active = self.store.add({**FIELDS, "amount_kopeks": 10000})
+        archived_ids = []
+        with self.store.connection:
+            for name, hoster, amount in (("CDN", "Yandex", 30000), ("БС", "Reg.ru", 77600)):
+                cursor = self.store.connection.execute("""INSERT INTO servers
+                    (name, hoster, website, starts_on, ends_on, deleted_at)
+                    VALUES (?, ?, '', '', '', '2026-10-12T12:00:00+00:00')""", (name, hoster))
+                archived_ids.append(cursor.lastrowid)
+                self.store.connection.execute("""INSERT INTO payments (server_id, starts_on, ends_on, amount_kopeks)
+                    VALUES (?, '', '', ?)""", (cursor.lastrowid, amount))
+        before = self.store.statistics()
+        self.store.close()
+        self.store = Storage(Path(self.directory.name) / "report.sqlite3")
+        self.assertEqual(self.store.statistics(), before)
+        self.assertEqual([server["id"] for server in self.store.list()], [active["id"]])
+        snapshot = self.store.statistics()
+        expected = copy.deepcopy(snapshot)
+        book = read_report(snapshot)
+        for title, total in (("Сводка", 1176), ("Удалённые", 1076)):
+            rows = list(book[title].values)
+            self.assertEqual(next(row[7] for row in rows if row[0] == "Всего учтено, ₽"), total)
+            for server_id, amount in zip(archived_ids, (300, 776)):
+                row = next(row for row in rows if row[0] == server_id)
+                self.assertEqual((row[6], row[7]), ("не указан", amount))
+        for server_id, amount in zip(archived_ids, (300, 776)):
+            self.assertIsNone(self.store.get(server_id))
+            single = read_report(self.store.statistics(server_id), single=True)
+            archived_sheet = next(sheet for sheet in book.worksheets if sheet.title.startswith(f"{server_id} "))
+            for sheet in (archived_sheet, single.worksheets[0]):
+                rows = list(sheet.values)
+                header = next(index for index, row in enumerate(rows) if row[0] == "Начало периода")
+                self.assertEqual(rows[header + 1][:3], ("не указан", "не указан", amount))
+                self.assertEqual(next(row[1] for row in rows if row[0] == "Всего учтено, ₽"), amount)
+        self.assertEqual(snapshot, expected)
+        self.assertEqual(self.store.statistics(), expected)
+
 
 if __name__ == "__main__":
     unittest.main()

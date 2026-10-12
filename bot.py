@@ -121,21 +121,25 @@ class BotUI:
         total = sum(server["total_paid_kopeks"] for server in servers)
         active_total = sum(server["total_paid_kopeks"] for server in active)
         unknown = sum(server["unknown_payments"] for server in servers)
-        periods = sum(len(server["payments"]) for server in servers)
-        bonus = sum(payment["paid_with_bonus"] for server in servers for payment in server["payments"])
+        payments = [payment for server in servers for payment in server["payments"]]
+        periods = sum(bool(payment["starts_on"] and payment["ends_on"]) for payment in payments)
+        bonus = sum(payment["paid_with_bonus"] for payment in payments)
         rows = [[("📥 Скачать по всем серверам", "report:all")],
                 [("🟢 Активные серверы", "stats:active:0"), ("🗃 Архивные серверы", "stats:archive:0")],
                 [("🏠 Главное меню", "menu")]]
         text = ("📊 <b>Статистика серверов</b>\n\n"
-                f"<b>Расходы за всё время</b>\nУчтено: <b>{format_money(total)}</b>\n"
-                f"Активные серверы: {format_money(active_total)}\n"
-                f"Архив: {format_money(total - active_total)}\n\n"
-                f"<b>Серверы</b>\nАктивных: <b>{len(active)}</b>\nВ архиве: <b>{len(servers) - len(active)}</b>\n\n"
-                f"<b>История оплат</b>\nПериодов: <b>{periods}</b>\nБонусами оплачено: <b>{bonus}</b>\n"
-                f"Периодов без суммы: <b>{unknown}</b>")
+                f"💰 <b>Расходы за всё время</b>\nСуммарно: <b>{format_money(total)}</b>\n"
+                f"🟢 Активные серверы: {format_money(active_total)}\n"
+                f"🗃 Архив: {format_money(total - active_total)}\n\n──────────────\n\n"
+                f"🖥 <b>Серверы</b>\n🟢 Активных: <b>{len(active)}</b>\n🗃 В архиве: <b>{len(servers) - len(active)}</b>\n\n──────────────\n\n"
+                f"🧾 <b>История оплат</b>\n📅 Периодов: <b>{periods}</b>\n")
+        if len(payments) > periods:
+            text += f"📝 Оплат без указанного периода: <b>{len(payments) - periods}</b>\n"
+        text += (f"🎁 Бонусами оплачено: <b>{bonus}</b>\n"
+                 f"❔ Периодов без суммы: <b>{unknown}</b>")
         if unknown:
             text += "\n⚠️ Итог неполный: учтены только известные суммы."
-        text += "\n\n<b>Выгрузка в Excel</b>\nВыберите группу серверов или скачайте общую историю оплат."
+        text += "\n\n──────────────\n\n📥 <b>Выгрузка в Excel</b>\nВыберите группу серверов или скачайте общую историю оплат."
         await self.say(message, text, keyboard(rows))
 
     async def list_statistics_servers(self, message, group, page):
