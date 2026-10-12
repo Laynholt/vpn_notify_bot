@@ -157,7 +157,8 @@ class MigrationTests(unittest.TestCase):
                 try:
                     self.assertEqual(store.get(7), dict(id=7, version=4, name="VPN", hoster="Host",
                         website="https://example.com", starts_on="2026-10-01", ends_on="2026-10-19",
-                        ip_address="", domain=""))
+                        ip_address="", domain="", deleted_at=None, payment_starts_on="2026-10-01",
+                        amount_kopeks=None, total_paid_kopeks=0, known_payments=0, unknown_payments=1))
                     self.assertEqual(len(store.list()), 1)
                     self.assertTrue(store.delivered(7, "2026-10-19", 123, "2026-10-12"))
                 finally:
