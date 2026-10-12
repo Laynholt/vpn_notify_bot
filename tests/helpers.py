@@ -2,8 +2,8 @@ from datetime import datetime, timezone
 
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import SendMessage
-from aiogram.types import Chat, Message
+from aiogram.methods import GetMe, GetWebhookInfo, SendMessage
+from aiogram.types import Chat, Message, User, WebhookInfo
 
 
 class TelegramSession(BaseSession):
@@ -17,6 +17,10 @@ class TelegramSession(BaseSession):
 
     async def make_request(self, bot, method, timeout=None):
         self.requests.append(method)
+        if isinstance(method, GetMe):
+            return User(id=bot.id, is_bot=True, first_name="Bot", username="test_bot")
+        if isinstance(method, GetWebhookInfo):
+            return WebhookInfo(url="", has_custom_certificate=False, pending_update_count=0)
         if isinstance(method, SendMessage):
             if method.chat_id in self.failures:
                 raise self.failures[method.chat_id](method)
