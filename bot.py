@@ -231,10 +231,13 @@ class BotUI:
         if draft.kind == "archive":
             prefix = ("Действительно хотите отказаться от сервера?" if draft.return_to_reminder
                       else "Действительно хотите поместить этот сервер в архив?")
-            prefix += (f"\nСервер будет перемещён из активных в архив по окончании оплаченного периода "
-                       f"({display_date(draft.values['ends_on'])} включительно).\nИстория оплат сохранится.")
+            prefix = (f"🗃 <b>{prefix}</b>\n\n"
+                      f"📅 Оплачен до <b>{display_date(draft.values['ends_on'])} включительно</b>.\n"
+                      "⏳ Сервер перейдёт из активных в архив по окончании оплаченного периода.\n"
+                      "🧾 История оплат сохранится.")
             if draft.values["ends_on"] < self.today().isoformat():
-                prefix += "\nОплаченный период уже закончился — сервер уйдёт в архив сразу."
+                prefix += "\n\n⚠️ <b>Оплаченный период уже закончился — сервер уйдёт в архив сразу.</b>"
+            prefix += "\n\n──────────────"
         await self.say(message, f"{prefix}\n\n{server_text(draft.values, today=self.today())}",
                        self.form_keyboard(draft, confirm=True))
 
