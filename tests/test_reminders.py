@@ -48,7 +48,8 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("vpn.example.com", self.session.messages[0].text)
         actions = [button.callback_data for row in self.session.messages[0].reply_markup.inline_keyboard
                    for button in row if button.callback_data]
-        self.assertFalse(any(action.startswith("delete:") for action in actions))
+        self.assertIn(f"decline:{server['id']}:1", actions)
+        self.assertIn("\n<b>Не забудьте продлить.</b>", self.session.messages[0].text)
         self.assertTrue(self.store.delivered(server["id"], "2026-10-19", 123, "2026-10-12"))
 
     async def test_eight_days_away_is_not_due(self):
@@ -62,6 +63,21 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await self.tick()
         self.assertEqual(self.session.messages, [])
         self.assertFalse(self.store.delivered(server["id"], server["ends_on"], 123, "2026-10-12"))
+
+    async def test_pending_archive_stops_reminders_and_runs_before_notification_time(self):
+        server = self.store.add(FIELDS)
+        self.store.schedule_archive(server["id"], 1)
+        await self.tick()
+        self.assertEqual(self.session.messages, [])
+        self.assertFalse(self.store.delivered(server["id"], server["ends_on"], 123, "2026-10-12"))
+        await self.tick(day=19, hour=8)
+        self.assertIsNotNone(self.store.get(server["id"]))
+        self.store.close()
+        self.store = Storage(self.settings.database_path)
+        self.notifier = Notifier(self.bot, self.store, replace(self.settings, notify_overdue=False))
+        await self.notifier.tick(datetime(2026, 10, 19, 21, 0, tzinfo=timezone.utc))
+        self.assertIsNone(self.store.get(server["id"]))
+        self.assertEqual(self.session.messages, [])
 
     async def test_restart_does_not_duplicate_but_next_day_sends(self):
         self.store.add(FIELDS)
@@ -77,7 +93,7 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await self.tick()
         self.assertIn("Просрочен", self.session.messages[0].text)
         buttons = self.session.messages[0].reply_markup.inline_keyboard
-        self.assertTrue(any(button.callback_data and button.callback_data.startswith("delete:")
+        self.assertTrue(any(button.callback_data and button.callback_data.startswith("decline:")
                             for row in buttons for button in row))
         self.notifier = Notifier(self.bot, self.store, replace(self.settings, notify_overdue=False))
         self.session.requests.clear()

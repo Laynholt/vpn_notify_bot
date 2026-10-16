@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import date
 from contextlib import closing
 from pathlib import Path
 
@@ -59,6 +60,39 @@ class HistoryTests(unittest.TestCase):
         self.store.mark_delivered(server["id"], server["ends_on"], 123, "2026-10-12")
         self.assertFalse(self.store.delivered(server["id"], server["ends_on"], 123, "2026-10-12"))
         self.assertEqual(self.store.statistics(999), [])
+
+    def test_scheduled_archive_survives_restart_and_keeps_inclusive_paid_day(self):
+        server = self.store.add({**FIELDS, "amount_kopeks": 10000})
+        history = self.store.payment_history(server["id"])
+        self.store.mark_delivered(server["id"], server["ends_on"], 123, "2026-10-12")
+        self.assertTrue(self.store.schedule_archive(server["id"], 1))
+        self.assertFalse(self.store.schedule_archive(server["id"], 1))
+        self.store.close()
+        self.store = Storage(self.path)
+        self.assertTrue(self.store.get(server["id"])["archive_pending"])
+        self.store.archive_due(date(2026, 10, 19))
+        self.assertIsNotNone(self.store.get(server["id"]))
+        self.store.archive_due(date(2026, 10, 20))
+        archived = self.store.statistics(server["id"])[0]
+        self.assertIsNone(self.store.get(server["id"]))
+        self.assertTrue(archived["deleted_at"])
+        self.assertEqual(archived["payments"], history)
+        self.assertEqual(archived["total_paid_kopeks"], 10000)
+        self.assertTrue(self.store.delivered(server["id"], server["ends_on"], 123, "2026-10-12"))
+        self.store.archive_due(date(2026, 10, 21))
+        self.assertEqual(self.store.statistics(server["id"])[0], archived)
+
+    def test_renewal_cancels_pending_archive_but_field_edit_keeps_it(self):
+        server = self.store.add(FIELDS)
+        self.store.schedule_archive(server["id"], 1)
+        self.assertTrue(self.store.update(server["id"], 2, {"name": "Changed"}))
+        self.assertTrue(self.store.get(server["id"])["archive_pending"])
+        self.assertFalse(self.store.renew(server["id"], 1, "2026-11-19", 10000))
+        self.assertTrue(self.store.get(server["id"])["archive_pending"])
+        self.assertTrue(self.store.renew(server["id"], 3, "2026-11-19", 10000))
+        self.assertFalse(self.store.get(server["id"])["archive_pending"])
+        self.store.archive_due(date(2026, 12, 1))
+        self.assertIsNotNone(self.store.get(server["id"]))
 
     def test_migration_twice_keeps_one_unknown_payment_and_deliveries(self):
         self.store.close()

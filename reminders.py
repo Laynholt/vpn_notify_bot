@@ -22,6 +22,8 @@ def server_text(server, *, today=None):
     remaining = (date.fromisoformat(server["ends_on"]) - today).days
     status = f"🟢 Оплачен · осталось {remaining} дн." if remaining > 0 else (
         "🟡 Оплата заканчивается сегодня" if remaining == 0 else f"🔴 Просрочен на {-remaining} дн.")
+    if server.get("archive_pending"):
+        status += "\n🗃 <b>Запланирован архив по окончании оплаченного периода.</b>\nНапоминания отключены. Продление отменит архивирование."
     amount = server.get("amount_kopeks")
     bonus = " · Оплачено бонусами" if server.get("paid_with_bonus") else ""
     known = server.get("known_payments", int(amount is not None))
@@ -41,12 +43,22 @@ def server_text(server, *, today=None):
             f"<b>Расходы</b>\nЗа период: {format_money(amount)}{bonus}\nВсего оплачено: {total}")
 
 
+def reminder_text(server, today):
+    remaining = (date.fromisoformat(server["ends_on"]) - today).days
+    if remaining < 0:
+        status = f"⚠️ Просрочен на {-remaining} дн.\n<b>Продлите или отправьте сервер в архив.</b>"
+    elif remaining == 0:
+        status = "⚠️ Оплаченный период заканчивается сегодня.\n<b>Не забудьте продлить.</b>"
+    else:
+        status = f"🔔 До окончания оплаты: {remaining} дн.\n<b>Не забудьте продлить.</b>"
+    return f"{status}\n\n{server_text(server, today=today)}"
+
+
 def reminder_keyboard(server, today):
     identity = f"{server['id']}:{server['version']}"
     rows = [[InlineKeyboardButton(text="Продлил", callback_data=f"renew:{identity}")]]
     rows.append([InlineKeyboardButton(text="🌐 Открыть хостер", url=server["website"])])
-    if date.fromisoformat(server["ends_on"]) < today:
-        rows.append([InlineKeyboardButton(text="Удалить", callback_data=f"delete:{identity}")])
+    rows.append([InlineKeyboardButton(text="Отказаться", callback_data=f"decline:{identity}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -57,17 +69,18 @@ class Notifier:
 
     async def tick(self, now):
         local = now.astimezone(self.settings.timezone)
+        today = local.date()
+        self.storage.archive_due(today)
         if local.time().replace(tzinfo=None) < self.settings.notify_time:
             return
         started = time.monotonic()
-        today = local.date()
         for snapshot in self.storage.list():
             for admin_id in self.settings.admin_ids:
                 if (now < self.retry_at.get(admin_id, now)
                         or now < self.retry_at.get((snapshot["id"], admin_id), now)):
                     continue
                 server = self.storage.get(snapshot["id"])
-                if server is None:
+                if server is None or server["archive_pending"]:
                     break
                 remaining = (date.fromisoformat(server["ends_on"]) - today).days
                 if remaining > self.settings.remind_days or (remaining < 0 and not self.settings.notify_overdue):
@@ -75,15 +88,9 @@ class Notifier:
                 day = today.isoformat()
                 if self.storage.delivered(server["id"], server["ends_on"], admin_id, day):
                     continue
-                if remaining < 0:
-                    status = f"⚠️ Просрочен на {abs(remaining)} дн. Продлите или удалите сервер."
-                elif remaining == 0:
-                    status = "⚠️ Оплаченный период заканчивается сегодня. Не забудьте продлить."
-                else:
-                    status = f"🔔 До окончания оплаты: {remaining} дн. Не забудьте продлить."
                 try:
                     await self.bot.send_message(
-                        admin_id, f"{status}\n\n{server_text(server, today=today)}", parse_mode="HTML",
+                        admin_id, reminder_text(server, today), parse_mode="HTML",
                         link_preview_options=LinkPreviewOptions(is_disabled=True),
                         reply_markup=reminder_keyboard(server, today))
                 except TelegramAPIError as error:

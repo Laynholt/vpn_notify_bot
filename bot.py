@@ -12,7 +12,7 @@ from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.methods import EditMessageText, SendMessage
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
-from reminders import display_date, server_text
+from reminders import display_date, reminder_keyboard, reminder_text, server_text
 from reports import build_report
 from storage import FIELDS, format_money, validate_amount, validate_field, validate_payment_dates, validate_server
 
@@ -56,6 +56,7 @@ class Draft:
     selected_field: str | None = None
     ready: bool = False
     needs_prompt: bool = False
+    return_to_reminder: bool = False
 
 
 class BotUI:
@@ -129,12 +130,14 @@ class BotUI:
     async def card(self, message, server_id):
         server = self.storage.get(server_id)
         if server is None:
-            await self.say(message, "Сервер уже удалён.", MENU)
+            await self.say(message, "Сервер уже в архиве.", MENU)
             return
         identity = f"{server['id']}:{server['version']}"
         rows = [[("Продлить", f"renew:{identity}"), ("Редактировать", f"fields:{identity}")],
-                [("Скачать статистику", f"report:{server_id}"), ("Удалить", f"delete:{identity}")],
+                [("Скачать статистику", f"report:{server_id}")],
                 [("🖥 Мои сервера", "servers:0"), ("🏠 Главное меню", "menu")]]
+        if not server["archive_pending"]:
+            rows[1].append(("В архив", f"archive:{identity}"))
         await self.say(message, server_text(server, today=self.today()), keyboard(rows))
 
     async def list_statistics(self, message):
@@ -205,7 +208,7 @@ class BotUI:
     def form_keyboard(self, draft, confirm=False):
         rows = []
         if confirm:
-            text = "Да, удалить" if draft.kind == "delete" else "Сохранить"
+            text = "Да, в архив" if draft.kind == "archive" else "Сохранить"
             rows.append([(text, f"save:{draft.token}")])
         rows.append([("Отмена", f"cancel:{draft.token}")])
         return keyboard(rows)
@@ -224,7 +227,14 @@ class BotUI:
         draft.needs_prompt = False
 
     async def preview(self, message, draft):
-        prefix = "Удалить этот сервер?" if draft.kind == "delete" else "Проверьте данные и нажмите «Сохранить»:"
+        prefix = "Проверьте данные и нажмите «Сохранить»:"
+        if draft.kind == "archive":
+            prefix = ("Действительно хотите отказаться от сервера?" if draft.return_to_reminder
+                      else "Действительно хотите поместить этот сервер в архив?")
+            prefix += (f"\nСервер будет перемещён из активных в архив по окончании оплаченного периода "
+                       f"({display_date(draft.values['ends_on'])} включительно).\nИстория оплат сохранится.")
+            if draft.values["ends_on"] < self.today().isoformat():
+                prefix += "\nОплаченный период уже закончился — сервер уйдёт в архив сразу."
         await self.say(message, f"{prefix}\n\n{server_text(draft.values, today=self.today())}",
                        self.form_keyboard(draft, confirm=True))
 
@@ -234,6 +244,7 @@ class BotUI:
                        keyboard([[("Открыть сервер", f"view:{server_id}")], [("🏠 Главное меню", "menu")]]))
 
     async def on_message(self, message):
+        self.storage.archive_due(self.today())
         await self._handle_message(message)
         try:
             await message.delete()
@@ -312,8 +323,8 @@ class BotUI:
             if saved is None or saved["version"] != draft.version:
                 await self.stale(message, admin_id, server_id)
                 return
-            if draft.kind == "delete":
-                success = self.storage.delete(server_id, draft.version)
+            if draft.kind == "archive":
+                success = self.storage.schedule_archive(server_id, draft.version)
             else:
                 if draft.kind == "renew" and draft.values["ends_on"] < self.today().isoformat():
                     draft.ready = False
@@ -329,13 +340,15 @@ class BotUI:
                 await self.stale(message, admin_id, server_id)
                 return
         self.drafts.pop(admin_id, None)
-        if draft.kind == "delete":
-            await self.say(message, "Сервер удалён.", MENU)
+        self.storage.archive_due(self.today())
+        if draft.kind == "archive" and self.storage.get(server_id) is None:
+            await self.say(message, "Сервер помещён в архив. История оплат сохранена в статистике.", MENU)
         else:
             await self.card(message, server_id)
 
     async def on_callback(self, callback):
         await callback.answer()
+        self.storage.archive_due(self.today())
         message, admin_id = callback.message, callback.from_user.id
         if (message.chat.id not in self.panels and message.text and message.reply_markup
                 and any(button.callback_data in ("menu", "add")
@@ -356,7 +369,17 @@ class BotUI:
             if not draft or draft.token != parts[1]:
                 await self.say(message, "Эта кнопка устарела. Используйте кнопки текущего действия.")
             elif action == "cancel":
-                await self.menu(message, admin_id)
+                if draft.kind == "archive":
+                    self.drafts.pop(admin_id, None)
+                    server = self.storage.get(draft.server_id)
+                    if server is None or server["version"] != draft.version:
+                        await self.stale(message, admin_id, draft.server_id)
+                    elif draft.return_to_reminder:
+                        await self.say(message, reminder_text(server, self.today()), reminder_keyboard(server, self.today()))
+                    else:
+                        await self.card(message, draft.server_id)
+                else:
+                    await self.menu(message, admin_id)
             elif draft.ready:
                 await self.save(message, admin_id, draft)
         elif action == "report" and len(parts) == 2 and (parts[1] == "all" or parts[1].isdigit()):
@@ -373,7 +396,7 @@ class BotUI:
                 await self.list_statistics(message)
             else:
                 await self.card(message, int(parts[1]))
-        elif (action in ("edit", "renew", "delete", "fields") and len(parts) == (4 if action == "edit" else 3)
+        elif (action in ("edit", "renew", "delete", "archive", "decline", "fields") and len(parts) == (4 if action == "edit" else 3)
               and parts[1].isdigit() and parts[2].isdigit()):
             server_id, version = int(parts[1]), int(parts[2])
             selected = parts[3] if action == "edit" else "ends_on"
@@ -389,9 +412,16 @@ class BotUI:
                 rows.append([("← К серверу", f"view:{server_id}")])
                 await self.say(message, "✏️ Выберите данные для изменения:", keyboard(rows))
                 return
-            draft = Draft(action, values=dict(server),
+            archiving = action in ("delete", "archive", "decline")
+            if archiving and server["archive_pending"]:
+                await self.card(message, server_id)
+                return
+            if action == "decline":
+                self.panels[message.chat.id] = message.message_id
+                self.panel_markups[message.chat.id] = message.reply_markup
+            draft = Draft("archive" if archiving else action, values=dict(server),
                           server_id=server_id, version=version, selected_field=selected,
-                          ready=action == "delete")
+                          ready=archiving, return_to_reminder=action == "decline")
             self.drafts[admin_id] = draft
             if draft.ready:
                 await self.preview(message, draft)

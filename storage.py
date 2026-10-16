@@ -128,6 +128,9 @@ class Storage:
                     self.connection.execute(f"ALTER TABLE servers ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
             if "deleted_at" not in columns:
                 self.connection.execute("ALTER TABLE servers ADD COLUMN deleted_at TEXT")
+            if "archive_pending" not in columns:
+                self.connection.execute("""ALTER TABLE servers ADD COLUMN
+                    archive_pending INTEGER NOT NULL DEFAULT 0 CHECK (archive_pending IN (0, 1))""")
             self.connection.execute("""CREATE TABLE IF NOT EXISTS payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 server_id INTEGER NOT NULL REFERENCES servers(id),
@@ -229,11 +232,23 @@ class Storage:
             validate_amount(amount_kopeks)
             validate_amount(saved["total_paid_kopeks"] + amount_kopeks)
             starts_on = (date.fromisoformat(saved["ends_on"]) + timedelta(days=1)).isoformat()
-            self.connection.execute("UPDATE servers SET ends_on=?, version=version+1 WHERE id=? AND version=?",
+            self.connection.execute("UPDATE servers SET ends_on=?, archive_pending=0, version=version+1 WHERE id=? AND version=?",
                                     (ends_on, server_id, version))
             self.connection.execute("INSERT INTO payments (server_id, starts_on, ends_on, amount_kopeks) VALUES (?, ?, ?, ?)",
                                     (server_id, starts_on, ends_on, amount_kopeks))
         return True
+
+    def schedule_archive(self, server_id, version):
+        with self.connection:
+            cursor = self.connection.execute("""UPDATE servers SET archive_pending=1, version=version+1
+                WHERE id=? AND version=? AND deleted_at IS NULL AND archive_pending=0""", (server_id, version))
+        return cursor.rowcount == 1
+
+    def archive_due(self, today):
+        with self.connection:
+            self.connection.execute("""UPDATE servers SET deleted_at=?, version=version+1
+                WHERE archive_pending=1 AND deleted_at IS NULL AND ends_on < ?""",
+                (datetime.now(timezone.utc).isoformat(), today.isoformat()))
 
     def delete(self, server_id, version):
         with self.connection:

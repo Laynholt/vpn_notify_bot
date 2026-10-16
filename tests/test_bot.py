@@ -426,16 +426,62 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-11-19")
         self.assertIn("изменён", self.session.messages[-1].text)
 
-    async def test_delete_requires_confirmation_and_stale_delete_is_rejected(self):
+    async def test_archive_requires_confirmation_and_stale_delete_is_rejected(self):
         server = self.store.add(FIELDS)
         await self.click(f"delete:{server['id']}:1")
-        delete = self.button("Да, удалить")
+        delete = self.button("Да, в архив")
         self.assertIsNotNone(self.store.get(server["id"]))
         self.store.update(server["id"], 1, {"ends_on": "2026-11-19"})
         await self.click(delete)
         self.assertIsNotNone(self.store.get(server["id"]))
         await self.click(f"delete:{server['id']}:2")
-        await self.click(self.button("Да, удалить"))
+        await self.click(self.button("Да, в архив"))
+        self.assertTrue(self.store.get(server["id"])["archive_pending"])
+
+    async def test_card_archive_cancel_returns_to_card_and_confirm_schedules(self):
+        server = self.store.add(FIELDS)
+        await self.click(f"view:{server['id']}")
+        await self.click(self.button("В архив"))
+        self.assertIn("19.10.2026", self.session.messages[-1].text)
+        self.assertIn("по окончании", self.session.messages[-1].text)
+        await self.click(self.button("Отмена"))
+        self.button("Продлить")
+        self.assertFalse(self.store.get(server["id"])["archive_pending"])
+        await self.click(self.button("В архив"))
+        await self.click(self.button("Да, в архив"))
+        self.assertTrue(self.store.get(server["id"])["archive_pending"])
+        self.assertIn("Запланирован архив", self.session.messages[-1].text)
+
+    async def test_decline_replaces_reminder_and_cancel_restores_its_actions(self):
+        from reminders import reminder_keyboard, server_text
+        server = self.store.add(FIELDS)
+        await self.send("/start")
+        reminder = await self.bot.send_message(123, server_text(server),
+            reply_markup=reminder_keyboard(server, date(2026, 10, 12)))
+        await self.click(f"decline:{server['id']}:1", message=reminder)
+        self.assertEqual(self.session.messages[-1].message_id, reminder.message_id)
+        self.assertIn("отказаться", self.session.messages[-1].text)
+        await self.click(self.button("Отмена"))
+        self.assertEqual(self.session.messages[-1].message_id, reminder.message_id)
+        self.button("Продлил")
+        self.button("Отказаться")
+        links = [button.url for row in self.session.messages[-1].reply_markup.inline_keyboard
+                 for button in row if button.url]
+        self.assertEqual(links, ["https://example.com"])
+        self.assertFalse(self.store.get(server["id"])["archive_pending"])
+        await self.click(self.button("Отказаться"))
+        await self.click(self.button("Да, в архив"))
+        self.assertTrue(self.store.get(server["id"])["archive_pending"])
+
+    async def test_overdue_archive_is_immediate_and_expired_pending_card_is_unavailable(self):
+        overdue = self.store.add({**FIELDS, "ends_on": "2026-10-11"})
+        await self.click(f"delete:{overdue['id']}:1")
+        await self.click(self.button("Да, в архив"))
+        self.assertIsNone(self.store.get(overdue["id"]))
+        server = self.store.add(FIELDS)
+        self.store.schedule_archive(server["id"], 1)
+        with patch("bot.BotUI.today", return_value=date(2026, 10, 20)):
+            await self.click(f"view:{server['id']}")
         self.assertIsNone(self.store.get(server["id"]))
 
     async def test_old_save_and_cancel_do_not_affect_new_draft(self):
@@ -568,7 +614,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<code>vpn.example.com</code>", message.text)
         self.assertIn("1 500,50 ₽", message.text)
         labels = [b.text for row in message.reply_markup.inline_keyboard for b in row]
-        self.assertEqual(labels[:4], ["Продлить", "Редактировать", "Скачать статистику", "Удалить"])
+        self.assertEqual(labels[:4], ["Продлить", "Редактировать", "Скачать статистику", "В архив"])
         self.assertNotIn("Название сервера", labels)
 
     async def test_incomplete_payment_totals_are_labeled(self):
