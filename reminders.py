@@ -62,6 +62,23 @@ def reminder_keyboard(server, today):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def cleanup_reminders(bot, storage):
+    for message in storage.outdated_reminders():
+        admin_id, message_id = message["admin_id"], message["message_id"]
+        try:
+            try:
+                await bot.delete_message(admin_id, message_id)
+            except TelegramBadRequest as error:
+                reason = error.message.lower()
+                if "message to delete not found" not in reason:
+                    raise
+        except TelegramAPIError as error:
+            logger.warning("Не очищено напоминание: сервер %s, администратор %s, %s",
+                           message["server_id"], admin_id, type(error).__name__)
+        else:
+            storage.forget_reminder(admin_id, message_id)
+
+
 class Notifier:
     def __init__(self, bot, storage, settings):
         self.bot, self.storage, self.settings = bot, storage, settings
@@ -71,6 +88,7 @@ class Notifier:
         local = now.astimezone(self.settings.timezone)
         today = local.date()
         self.storage.archive_due(today)
+        await cleanup_reminders(self.bot, self.storage)
         if local.time().replace(tzinfo=None) < self.settings.notify_time:
             return
         started = time.monotonic()
@@ -89,7 +107,7 @@ class Notifier:
                 if self.storage.delivered(server["id"], server["ends_on"], admin_id, day):
                     continue
                 try:
-                    await self.bot.send_message(
+                    sent = await self.bot.send_message(
                         admin_id, reminder_text(server, today), parse_mode="HTML",
                         link_preview_options=LinkPreviewOptions(is_disabled=True),
                         reply_markup=reminder_keyboard(server, today))
@@ -103,7 +121,9 @@ class Notifier:
                                    server["id"], admin_id, type(error).__name__)
                 else:
                     self.retry_at.pop((server["id"], admin_id), None)
+                    self.storage.remember_reminder(server["id"], server["ends_on"], admin_id, sent.message_id)
                     self.storage.mark_delivered(server["id"], server["ends_on"], admin_id, day)
+                    await cleanup_reminders(self.bot, self.storage)
                 await asyncio.sleep(1.05)
 
     async def run(self):

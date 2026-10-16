@@ -543,6 +543,110 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.store.payment_history(server["id"])), 1)
         self.assertIn("изменён", self.session.messages[-1].text)
 
+    async def test_saved_reminder_renewal_removes_notice_inputs_and_form(self):
+        from reminders import reminder_keyboard, server_text
+        server = self.store.add(FIELDS)
+        reminder = await self.bot.send_message(123, server_text(server),
+            reply_markup=reminder_keyboard(server, date(2026, 10, 12)))
+        await self.click(f"renew:{server['id']}:1", message=reminder)
+        self.assertIn((123, reminder.message_id), self.session.sent_messages)
+        await self.send("19.11.2026")
+        await self.send("200")
+        save = self.button("Сохранить")
+        panel = max(self.session.sent_messages.values(), key=lambda item: item.message_id)
+        await self.click(save)
+        self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-11-19")
+        self.assertEqual(self.session.sent_messages, {})
+        deleted = {(method.chat_id, method.message_id) for method in self.session.requests
+                   if isinstance(method, DeleteMessage)}
+        self.assertIn((123, reminder.message_id), deleted)
+        self.assertIn((123, panel.message_id), deleted)
+        self.assertTrue({(123, 2), (123, 3)} <= deleted)
+        await self.send("/start")
+        self.assertIn("Главное меню", self.session.messages[-1].text)
+
+    async def test_cancelled_reminder_renewal_keeps_notice(self):
+        from reminders import reminder_keyboard, server_text
+        server = self.store.add(FIELDS)
+        reminder = await self.bot.send_message(123, server_text(server),
+            reply_markup=reminder_keyboard(server, date(2026, 10, 12)))
+        await self.click(f"renew:{server['id']}:1", message=reminder)
+        await self.send("19.11.2026")
+        await self.send("200")
+        await self.click(self.button("Отмена"))
+        self.assertIn((123, reminder.message_id), self.session.sent_messages)
+        self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-10-19")
+
+    async def test_renewal_from_restored_reminder_cleans_same_message_panel(self):
+        from reminders import reminder_keyboard, server_text
+        server = self.store.add(FIELDS)
+        reminder = await self.bot.send_message(123, server_text(server),
+            reply_markup=reminder_keyboard(server, date(2026, 10, 12)))
+        await self.click(f"decline:{server['id']}:1", message=reminder)
+        await self.click(self.button("Отмена"))
+        await self.click(self.button("Продлил"))
+        await self.send("19.11.2026")
+        await self.send("200")
+        save = self.button("Сохранить")
+        original = self.session.make_request
+
+        async def reject_missing(bot, method, timeout=None):
+            if isinstance(method, DeleteMessage) and (method.chat_id, method.message_id) not in self.session.sent_messages:
+                raise TelegramBadRequest(method, "message to delete not found")
+            return await original(bot, method, timeout)
+
+        with patch.object(self.session, "make_request", side_effect=reject_missing):
+            await self.click(save)
+        self.assertEqual(self.session.sent_messages, {})
+        self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-11-19")
+
+    async def test_reminder_renewal_delete_failure_keeps_payment_and_shows_current_card(self):
+        from reminders import reminder_keyboard, server_text
+        server = self.store.add(FIELDS)
+        reminder = await self.bot.send_message(123, server_text(server),
+            reply_markup=reminder_keyboard(server, date(2026, 10, 12)))
+        await self.click(f"renew:{server['id']}:1", message=reminder)
+        await self.send("19.11.2026")
+        await self.send("200")
+        save = self.button("Сохранить")
+        self.session.delete_failures[123] = lambda method: TelegramNetworkError(method, "offline")
+        with self.assertLogs(level="WARNING"):
+            await self.click(save)
+        self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-11-19")
+        self.assertEqual(len(self.store.payment_history(server["id"])), 2)
+        self.button("Продлить")
+
+    async def test_cancelled_renewal_after_decline_keeps_original_reminder(self):
+        from reminders import reminder_keyboard, server_text
+        server = self.store.add(FIELDS)
+        reminder = await self.bot.send_message(123, server_text(server),
+            reply_markup=reminder_keyboard(server, date(2026, 10, 12)))
+        await self.click(f"decline:{server['id']}:1", message=reminder)
+        await self.click(self.button("Отмена"))
+        restored = self.session.sent_messages[(123, reminder.message_id)]
+        await self.click(self.button("Продлил"))
+        await self.click(self.button("Отмена"))
+        saved = self.session.sent_messages[(123, reminder.message_id)]
+        self.assertEqual(saved.text, restored.text)
+        self.assertEqual(saved.reply_markup, reminder.reply_markup)
+        self.assertEqual(self.store.get(server["id"])["ends_on"], "2026-10-19")
+
+    async def test_renewing_other_server_does_not_delete_reminder_used_as_panel(self):
+        from reminders import reminder_keyboard, server_text
+        servers = [self.store.add({**FIELDS, "name": name}) for name in ("First", "Second")]
+        reminders = [await self.bot.send_message(123, server_text(server),
+            reply_markup=reminder_keyboard(server, date(2026, 10, 12))) for server in servers]
+        await self.click(f"decline:{servers[0]['id']}:1", message=reminders[0])
+        await self.click(self.button("Отмена"))
+        first = self.session.sent_messages[(123, reminders[0].message_id)]
+        await self.click(f"renew:{servers[1]['id']}:1", message=reminders[1])
+        await self.send("19.11.2026")
+        await self.send("200")
+        await self.click(self.button("Сохранить"))
+        self.assertEqual(self.session.sent_messages[(123, first.message_id)], first)
+        self.assertNotIn((123, reminders[1].message_id), self.session.sent_messages)
+        self.assertEqual(self.store.get(servers[0]["id"])["ends_on"], "2026-10-19")
+
     async def test_edit_submenu_corrects_latest_amount_without_payment(self):
         server = self.store.add({**FIELDS, "amount_kopeks": 10000})
         self.store.renew(server["id"], 1, "2026-11-19", 20000)

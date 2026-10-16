@@ -88,6 +88,69 @@ class ReminderTests(unittest.IsolatedAsyncioTestCase):
         await self.tick(day=13)
         self.assertEqual(len(self.session.messages), 4)
 
+    async def test_next_daily_reminder_replaces_only_same_server_after_restart(self):
+        self.store.add(FIELDS)
+        unrelated = await self.bot.send_message(123, "Other message")
+        await self.tick()
+        old = set(self.session.sent_messages) - {(123, unrelated.message_id)}
+        self.store.close()
+        self.store = Storage(self.settings.database_path)
+        self.notifier = Notifier(self.bot, self.store, self.settings)
+        await self.tick(day=13)
+        self.assertFalse(old & set(self.session.sent_messages))
+        self.assertIn((123, unrelated.message_id), self.session.sent_messages)
+        reminders = [message for key, message in self.session.sent_messages.items()
+                     if key != (123, unrelated.message_id)]
+        self.assertEqual(len(reminders), 2)
+        self.assertTrue(all("6 дн." in message.text for message in reminders))
+
+    async def test_failed_new_delivery_keeps_previous_reminder_for_that_admin(self):
+        self.store.add(FIELDS)
+        await self.tick()
+        old = dict(self.session.sent_messages)
+        self.session.failures[123] = lambda method: TelegramNetworkError(method, "offline")
+        with self.assertLogs("reminders", level="WARNING"):
+            await self.tick(day=13)
+        for key in old:
+            self.assertEqual(key in self.session.sent_messages, key[0] == 123)
+        self.assertEqual(len(self.session.sent_messages), 2)
+
+    async def test_failed_delete_retries_after_restart_without_duplicate_delivery(self):
+        self.store.add(FIELDS)
+        await self.tick()
+        self.session.delete_failures[123] = lambda method: TelegramNetworkError(method, "offline")
+        with self.assertLogs("reminders", level="WARNING"):
+            await self.tick(day=13)
+        self.assertEqual(len(self.session.sent_messages), 3)
+        del self.session.delete_failures[123]
+        self.store.close()
+        self.store = Storage(self.settings.database_path)
+        self.notifier = Notifier(self.bot, self.store, self.settings)
+        await self.tick(day=13, hour=10)
+        self.assertEqual(len(self.session.sent_messages), 2)
+        self.assertEqual(len(self.session.messages), 4)
+
+    async def test_renewed_server_reminders_are_removed_before_notification_time(self):
+        server = self.store.add(FIELDS)
+        await self.tick()
+        self.store.renew(server["id"], 1, "2026-11-19", 10000)
+        await self.tick(day=13, hour=8)
+        self.assertEqual(self.session.sent_messages, {})
+        self.assertEqual(len(self.session.messages), 2)
+
+    async def test_delete_error_preserves_notification_text_and_buttons(self):
+        self.store.add(FIELDS)
+        await self.tick()
+        old = next(key for key in self.session.sent_messages if key[0] == 123)
+        original = self.session.sent_messages[old]
+        self.session.delete_failures[123] = lambda method: TelegramBadRequest(method, "message can't be deleted")
+        with self.assertLogs("reminders", level="WARNING"):
+            await self.tick(day=13)
+        message = self.session.sent_messages[old]
+        self.assertEqual(message.text, original.text)
+        self.assertEqual(message.reply_markup, original.reply_markup)
+        self.assertEqual(len(self.store.outdated_reminders()), 1)
+
     async def test_overdue_and_last_day(self):
         self.store.add({**FIELDS, "ends_on": "2026-10-11"})
         await self.tick()

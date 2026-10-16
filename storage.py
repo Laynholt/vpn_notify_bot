@@ -120,6 +120,11 @@ class Storage:
                 ends_on TEXT NOT NULL, admin_id INTEGER NOT NULL, day TEXT NOT NULL,
                 PRIMARY KEY (server_id, ends_on, admin_id, day)
             );
+            CREATE TABLE IF NOT EXISTS reminder_messages (
+                server_id INTEGER NOT NULL REFERENCES servers(id), ends_on TEXT NOT NULL,
+                admin_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+                PRIMARY KEY (admin_id, message_id)
+            );
         """)
         columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(servers)")}
         with self.connection:
@@ -261,6 +266,24 @@ class Storage:
         return self.connection.execute(
             "SELECT 1 FROM deliveries WHERE server_id=? AND ends_on=? AND admin_id=? AND day=?",
             (server_id, ends_on, admin_id, day)).fetchone() is not None
+
+    def remember_reminder(self, server_id, ends_on, admin_id, message_id):
+        with self.connection:
+            self.connection.execute("INSERT OR IGNORE INTO reminder_messages VALUES (?, ?, ?, ?)",
+                                    (server_id, ends_on, admin_id, message_id))
+
+    def outdated_reminders(self):
+        return [dict(row) for row in self.connection.execute("""
+            SELECT message.* FROM reminder_messages AS message JOIN servers ON servers.id=message.server_id
+            WHERE servers.deleted_at IS NOT NULL OR message.ends_on<>servers.ends_on
+                OR EXISTS (SELECT 1 FROM reminder_messages AS newer
+                    WHERE newer.server_id=message.server_id AND newer.admin_id=message.admin_id
+                        AND newer.message_id>message.message_id)
+            ORDER BY message.admin_id, message.message_id""")]
+
+    def forget_reminder(self, admin_id, message_id):
+        with self.connection:
+            self.connection.execute("DELETE FROM reminder_messages WHERE admin_id=? AND message_id=?", (admin_id, message_id))
 
     def mark_delivered(self, server_id, ends_on, admin_id, day):
         with self.connection:

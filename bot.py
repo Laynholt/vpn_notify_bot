@@ -12,7 +12,7 @@ from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.methods import EditMessageText, SendMessage
 from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
-from reminders import display_date, reminder_keyboard, reminder_text, server_text
+from reminders import cleanup_reminders, display_date, reminder_keyboard, reminder_text, server_text
 from reports import build_report
 from storage import FIELDS, format_money, validate_amount, validate_field, validate_payment_dates, validate_server
 
@@ -56,7 +56,7 @@ class Draft:
     selected_field: str | None = None
     ready: bool = False
     needs_prompt: bool = False
-    return_to_reminder: bool = False
+    from_reminder: bool = False
 
 
 class BotUI:
@@ -229,7 +229,7 @@ class BotUI:
     async def preview(self, message, draft):
         prefix = "Проверьте данные и нажмите «Сохранить»:"
         if draft.kind == "archive":
-            prefix = ("Действительно хотите отказаться от сервера?" if draft.return_to_reminder
+            prefix = ("Действительно хотите отказаться от сервера?" if draft.from_reminder
                       else "Действительно хотите поместить этот сервер в архив?")
             prefix = (f"🗃 <b>{prefix}</b>\n\n"
                       f"📅 Оплачен до <b>{display_date(draft.values['ends_on'])} включительно</b>.\n"
@@ -344,6 +344,21 @@ class BotUI:
                 return
         self.drafts.pop(admin_id, None)
         self.storage.archive_due(self.today())
+        if draft.kind == "renew":
+            await cleanup_reminders(message.bot, self.storage)
+            if draft.from_reminder:
+                panel_id = self.panels.get(message.chat.id)
+                if panel_id is not None:
+                    try:
+                        await message.bot.delete_message(message.chat.id, panel_id)
+                    except TelegramAPIError as error:
+                        if not (isinstance(error, TelegramBadRequest) and "message to delete not found" in error.message.lower()):
+                            logger.warning("Не удалена форма продления: %s", type(error).__name__)
+                            await self.card(message, server_id)
+                            return
+                    self.panels.pop(message.chat.id, None)
+                    self.panel_markups.pop(message.chat.id, None)
+                return
         if draft.kind == "archive" and self.storage.get(server_id) is None:
             await self.say(message, "Сервер помещён в архив. История оплат сохранена в статистике.", MENU)
         else:
@@ -377,7 +392,7 @@ class BotUI:
                     server = self.storage.get(draft.server_id)
                     if server is None or server["version"] != draft.version:
                         await self.stale(message, admin_id, draft.server_id)
-                    elif draft.return_to_reminder:
+                    elif draft.from_reminder:
                         await self.say(message, reminder_text(server, self.today()), reminder_keyboard(server, self.today()))
                     else:
                         await self.card(message, draft.server_id)
@@ -422,9 +437,15 @@ class BotUI:
             if action == "decline":
                 self.panels[message.chat.id] = message.message_id
                 self.panel_markups[message.chat.id] = message.reply_markup
+            from_reminder = action == "decline" or (action == "renew" and message.reply_markup is not None
+                and any(button.url for row in message.reply_markup.inline_keyboard for button in row))
+            if action == "renew" and from_reminder:
+                self.storage.remember_reminder(server_id, server["ends_on"], admin_id, message.message_id)
+                self.panels.pop(message.chat.id, None)
+                self.panel_markups.pop(message.chat.id, None)
             draft = Draft("archive" if archiving else action, values=dict(server),
                           server_id=server_id, version=version, selected_field=selected,
-                          ready=archiving, return_to_reminder=action == "decline")
+                          ready=archiving, from_reminder=from_reminder)
             self.drafts[admin_id] = draft
             if draft.ready:
                 await self.preview(message, draft)
