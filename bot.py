@@ -195,15 +195,9 @@ class BotUI:
         data = await asyncio.to_thread(build_report, servers, single=server_id is not None,
                                        timezone=self.settings.timezone)
         name = f"server-{server_id}-statistics.xlsx" if server_id is not None else "servers-statistics.xlsx"
-        await message.answer_document(BufferedInputFile(data, filename=name), caption="История оплаченных периодов и сумм в рублях.")
-        panel_id = self.panels.pop(message.chat.id, None)
-        self.panel_markups.pop(message.chat.id, None)
-        if panel_id is not None:
-            try:
-                await message.bot.edit_message_reply_markup(chat_id=message.chat.id, message_id=panel_id, reply_markup=None)
-            except TelegramAPIError as error:
-                logger.warning("Не снята клавиатура статистики: %s", type(error).__name__)
-        await self.list_statistics(message)
+        await message.answer_document(BufferedInputFile(data, filename=name),
+            caption="История оплаченных периодов и сумм в рублях.",
+            reply_markup=keyboard([[("🗑 Удалить сообщение", "report:delete")]]))
 
     def form_keyboard(self, draft, confirm=False):
         rows = []
@@ -365,9 +359,19 @@ class BotUI:
             await self.card(message, server_id)
 
     async def on_callback(self, callback):
+        message, admin_id = callback.message, callback.from_user.id
+        if callback.data == "report:delete":
+            if message.document:
+                try:
+                    await message.delete()
+                except TelegramAPIError as error:
+                    logger.warning("Не удалён файл статистики: %s", type(error).__name__)
+                    await callback.answer("Не удалось удалить файл. Попробуйте ещё раз.", show_alert=True)
+                    return
+            await callback.answer()
+            return
         await callback.answer()
         self.storage.archive_due(self.today())
-        message, admin_id = callback.message, callback.from_user.id
         if (message.chat.id not in self.panels and message.text and message.reply_markup
                 and any(button.callback_data in ("menu", "add")
                         or (button.callback_data or "").startswith(("cancel:", "save:", "stats:", "list:", "servers:", "view:"))

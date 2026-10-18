@@ -196,25 +196,75 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(isinstance(request, (EditMessageText, EditMessageReplyMarkup, DeleteMessage))
                              and request.message_id == reminder.message_id for request in self.session.requests[before:]))
 
-    async def test_report_keeps_file_and_creates_new_panel_after_retiring_previous_keyboard(self):
-        self.store.add(FIELDS)
+    async def test_report_keeps_current_panel_and_sends_only_the_file(self):
+        server = self.store.add(FIELDS)
         await self.send("/start")
-        await self.click("stats:0")
-        old_panel = max(self.session.sent_messages.values(), key=lambda item: item.message_id)
+        panel_id = next(iter(self.session.sent_messages))[1]
+        for action in (f"view:{server['id']}", "stats:0", "stats:active:0", "stats:archive:0"):
+            await self.click(action)
+            panel = self.session.sent_messages[(123, panel_id)]
+            before = len(self.session.requests)
+            for _ in range(2):
+                await self.click("report:all" if action == "stats:0" else f"report:{server['id']}")
+            self.assertEqual(self.session.sent_messages[(123, panel_id)], panel)
+            self.assertFalse(any(isinstance(request, (SendMessage, EditMessageText, EditMessageReplyMarkup, DeleteMessage))
+                                 for request in self.session.requests[before:]))
+        self.assertEqual(len(self.session.documents), 8)
+        await self.click("menu")
+        self.assertEqual(self.session.requests[-1].message_id, panel_id)
+
+    async def test_report_delete_removes_only_selected_file_after_restart_and_keeps_form(self):
+        server = self.store.add(FIELDS)
+        statistics = self.store.statistics()
+        await self.send("/start")
+        await self.click(f"view:{server['id']}")
+        await self.click(f"report:{server['id']}")
+        await self.click(f"report:{server['id']}")
+        documents = [message for message in self.session.sent_messages.values() if message.document]
+        self.assertIsNotNone(documents[0].reply_markup)
+        delete = documents[0].reply_markup.inline_keyboard[0][0].callback_data
+        await self.dispatcher.fsm.close()
+        self.dispatcher = create_dispatcher(self.store, self.settings)
+        await self.click("add")
+        before = dict(self.session.sent_messages)
+        await self.click(delete, message=documents[0])
+        del before[(123, documents[0].message_id)]
+        self.assertEqual(self.session.sent_messages, before)
+        await self.send("New server")
+        self.assertIn("хостера", self.session.messages[-1].text)
+        self.assertEqual(self.store.statistics(), statistics)
+
+    async def test_report_delete_failure_keeps_file_and_panel_and_allows_retry(self):
+        await self.send("/start")
         await self.click("report:all")
-        self.assertEqual(len(self.session.documents), 1)
-        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 2)
-        retirement = next(request for request in self.session.requests if isinstance(request, EditMessageReplyMarkup))
-        self.assertEqual(retirement.message_id, old_panel.message_id)
-        self.assertIsNone(retirement.reply_markup)
-        document_id = next(message.message_id for message in self.session.sent_messages.values() if message.document)
-        current_panel = max(self.session.sent_messages.values(), key=lambda item: item.message_id)
-        self.assertNotEqual(current_panel.message_id, old_panel.message_id)
-        await self.click("menu", message=old_panel)
-        self.assertEqual(self.session.requests[-1].message_id, current_panel.message_id)
-        self.assertFalse(any(isinstance(request, DeleteMessage) and request.message_id == old_panel.message_id for request in self.session.requests))
-        self.assertFalse(any(isinstance(request, (EditMessageText, EditMessageReplyMarkup, DeleteMessage))
-                             and request.message_id == document_id for request in self.session.requests))
+        document = next(message for message in self.session.sent_messages.values() if message.document)
+        self.assertIsNotNone(document.reply_markup)
+        delete = document.reply_markup.inline_keyboard[0][0].callback_data
+        before = dict(self.session.sent_messages)
+        for error in (TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError):
+            self.session.delete_failures[123] = lambda method, error=error: error(method, "cannot delete")
+            with self.assertLogs("bot", level="WARNING"):
+                await self.click(delete, message=document)
+            self.assertEqual(self.session.sent_messages, before)
+            self.assertTrue(self.session.requests[-1].show_alert)
+        del self.session.delete_failures[123]
+        await self.click(delete, message=document)
+        self.assertNotIn((123, document.message_id), self.session.sent_messages)
+
+    async def test_report_delete_is_admin_private_only_and_does_not_delete_panel(self):
+        await self.send("/start")
+        panel = next(iter(self.session.sent_messages.values()))
+        await self.click("report:all")
+        document = next(message for message in self.session.sent_messages.values() if message.document)
+        self.assertIsNotNone(document.reply_markup)
+        delete = document.reply_markup.inline_keyboard[0][0].callback_data
+        before = dict(self.session.sent_messages)
+        count = len(self.session.requests)
+        await self.click(delete, admin=999, message=document)
+        await self.click(delete, chat_type="group", message=document)
+        self.assertEqual(len(self.session.requests), count)
+        await self.click(delete, message=panel)
+        self.assertEqual(self.session.sent_messages, before)
 
     async def test_failed_document_send_keeps_same_panel_without_rotation(self):
         await self.send("/start")
@@ -233,20 +283,19 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         del self.session.document_failures[123]
         await self.click(self.button("📥 Скачать по всем серверам"))
         self.assertEqual(len([message for message in self.session.sent_messages.values() if message.document]), 1)
-        self.assertNotEqual(max(self.session.sent_messages)[1], panel_id)
+        self.assertEqual([message.message_id for message in self.session.sent_messages.values() if message.text], [panel_id])
         self.assertEqual(self.button("📥 Скачать по всем серверам"), "report:all")
 
-    async def test_report_creates_fresh_panel_even_if_old_keyboard_retirement_fails(self):
+    async def test_report_does_not_need_to_edit_panel(self):
         await self.send("/start")
         panel_id = max(self.session.sent_messages)[1]
         self.session.edit_failures[123] = lambda method: TelegramNetworkError(method, "offline")
-        with self.assertLogs("bot", level="WARNING"):
-            await self.click("report:all")
+        await self.click("report:all")
         self.assertEqual(len(self.session.documents), 1)
-        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 2)
+        self.assertEqual(sum(isinstance(request, SendMessage) for request in self.session.requests), 1)
         del self.session.edit_failures[123]
         await self.click("menu")
-        self.assertNotEqual(self.session.requests[-1].message_id, panel_id)
+        self.assertEqual(self.session.requests[-1].message_id, panel_id)
 
     async def test_unauthorized_messages_and_callbacks_are_silently_ignored(self):
         await self.send("/start", admin=999)

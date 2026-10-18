@@ -56,7 +56,8 @@ class TelegramSession(BaseSession):
             message = Message(message_id=1000 + len(self.requests), date=datetime.now(timezone.utc),
                               chat=Chat(id=method.chat_id, type="private"), caption=method.caption,
                               from_user=User(id=bot.id, is_bot=True, first_name="Bot"),
-                              document=Document(file_id="file", file_unique_id="unique"))
+                              document=Document(file_id="file", file_unique_id="unique"),
+                              reply_markup=method.reply_markup)
             self.sent_messages[(method.chat_id, message.message_id)] = message
             return message
         return True
